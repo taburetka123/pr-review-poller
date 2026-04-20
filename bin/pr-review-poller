@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Poll for PRs needing review and run `claude -p "/review-prs --auto"`.
+# Default: headless (invoked by launchd). --head: open an iTerm2 tab for debug.
+set -euo pipefail
+
+CONFIG_FILE="${PR_REVIEW_POLLER_CONFIG:-$HOME/.config/pr-review-poller/config.env}"
+if [[ -f "$CONFIG_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+fi
+MIN_COMMIT_AGE="${MIN_COMMIT_AGE:-10m}"
+
+MODE="headless"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --head) MODE="head"; shift ;;
+    --min-commit-age) MIN_COMMIT_AGE="$2"; shift 2 ;;
+    -h|--help)
+      cat <<EOF
+Usage: pr-review-poller [--head] [--min-commit-age DURATION]
+
+  --head                 Open an iTerm2 tab and run the review there (debug).
+                         Default is headless, writing to launchd stdout/stderr logs.
+  --min-commit-age DUR   Override the commit-age gate for this invocation.
+                         Format: 10m, 1h, 30m. 0 disables. Default from config ($MIN_COMMIT_AGE).
+
+Config file: $CONFIG_FILE
+EOF
+      exit 0
+      ;;
+    *) echo "unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+
+CLAUDE="/Users/kezoo/.local/bin/claude"
+SLASH="/review-prs --auto --min-commit-age ${MIN_COMMIT_AGE}"
+
+if [[ "$MODE" == "head" ]]; then
+  # Debug: open a new iTerm2 tab, run there, no lock (user-invoked).
+  osascript <<OSA
+tell application "iTerm"
+  activate
+  tell current window
+    create tab with default profile
+    tell current session of current tab
+      write text "$CLAUDE -p \"$SLASH\""
+    end tell
+  end tell
+end tell
+OSA
+  exit 0
+fi
+
+# Headless (launchd). Single-flight via flock.
+LOCK_FILE="$HOME/.local/state/pr-review-poller.lock"
+mkdir -p "$(dirname "$LOCK_FILE")"
+exec 200>"$LOCK_FILE"
+if ! flock -n 200; then
+  echo "[$(date -Iseconds)] previous run still active, skipping"
+  exit 0
+fi
+
+echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE)"
+"$CLAUDE" -p "$SLASH"
+echo "[$(date -Iseconds)] poll done"
