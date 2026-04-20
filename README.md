@@ -1,14 +1,14 @@
 # pr-review-poller
 
-Background launchd job that runs `claude -p "/review-prs --auto"` on a timer so teammate PRs get reviewed without you at the keyboard.
+Background launchd job that runs `claude -p "/kezoo-review-prs --auto"` on a timer so teammate PRs get reviewed without you at the keyboard.
 
-Pairs with the `--auto` mode on the personal `/review-prs` skill — which only posts confidence-5 blocker/major findings, approves otherwise, and silently drops everything else.
+Pairs with the `--auto` mode on the personal `/kezoo-review-prs` skill — which only posts confidence-5 blocker/major findings, approves otherwise, and silently drops everything else.
 
 ## What auto mode does per PR
 
 Three possible actions:
 
-- **POST** — submit a GitHub `COMMENT` review with inline findings. Only used when a `blocker` or `major` finding clears the author's post threshold (see trust matrix in the `/review-prs` skill).
+- **POST** — submit a GitHub `COMMENT` review with inline findings. Only used when a `blocker` or `major` finding clears the author's post threshold (see trust matrix in the `/kezoo-review-prs` skill).
 - **HOLD** — don't touch GitHub. Record the PR in a local ledger (`~/.local/state/pr-review-poller/held.json`) and DM yourself on Slack with the full review so you can decide. The PR is skipped on subsequent polls (until new commits) so you aren't spammed.
 - **APPROVE** — submit an `APPROVE` review with an empty body. No text, no noise.
 

@@ -113,7 +113,7 @@ cmd_run() {
     esac
   done
 
-  SLASH="/review-prs --auto --min-commit-age ${MIN_COMMIT_AGE}"
+  SLASH="/kezoo-review-prs --auto --min-commit-age ${MIN_COMMIT_AGE}"
 
   if [[ "$MODE" == "head" ]]; then
     osascript <<OSA
