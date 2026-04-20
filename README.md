@@ -16,31 +16,35 @@ Four layered checks prevent duplicate reviews, mid-push reviews, and beating hum
 ## Install
 
 ```
-./install.sh                                   # defaults: 10m interval, 10m commit-age gate
-./install.sh --interval 300 --min-commit-age 5m
+./install.sh                                         # defaults: 10m interval, 10m commit-age gate
+./install.sh --interval 300 --min-commit-age 5m      # custom
 ```
 
-Re-run `install.sh` any time to change settings; it unloads and reloads the launchd agent.
+Re-run any time to change settings. `install.sh` renders the plist and config but does NOT start polling — use `pr-review-poller start` when you're ready.
 
-After install:
-
+Installed artifacts:
 - bin: `~/.local/bin/pr-review-poller` (symlink → repo)
 - plist: `~/Library/LaunchAgents/com.kezoo.pr-review-poller.plist`
 - config: `~/.config/pr-review-poller/config.env`
 - logs: `~/worktrees/.pr-review-poller-{stdout,stderr}.log`
 
-## Debug run (visible)
+## Day-to-day
 
 ```
-pr-review-poller --head
+pr-review-poller              # status — is it running? interval? last run? config?
+pr-review-poller start        # begin polling (launchctl load)
+pr-review-poller stop         # pause polling (launchctl unload)
+pr-review-poller run          # run one cycle right now (headless, respects lock)
+pr-review-poller run --head   # run one cycle in a new iTerm2 tab, no lock (debug)
+pr-review-poller logs         # tail -F the stdout log
+pr-review-poller config       # print the config file
+pr-review-poller help
 ```
 
-Opens a new iTerm2 tab and runs the review there. No lock (user-invoked). Useful for watching what `/review-prs --auto` actually does on real PRs.
-
-## Ad-hoc override
+Ad-hoc override:
 
 ```
-pr-review-poller --min-commit-age 0   # disable age gate for this run
+pr-review-poller run --min-commit-age 0   # disable age gate for this single run
 ```
 
 ## Uninstall
@@ -49,4 +53,4 @@ pr-review-poller --min-commit-age 0   # disable age gate for this run
 ./uninstall.sh
 ```
 
-Removes the plist, symlink, config, and lock file. Leaves the logs.
+Removes the plist, symlink, config, and lock file. Leaves the logs for post-mortem.

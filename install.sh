@@ -42,8 +42,15 @@ EOF
 sed "s|{{INTERVAL_SECONDS}}|$INTERVAL_SECONDS|g" \
   "$REPO_DIR/launchd/com.kezoo.pr-review-poller.plist.tmpl" > "$PLIST_DST"
 
-launchctl unload "$PLIST_DST" 2>/dev/null || true
-launchctl load  "$PLIST_DST"
+# If the job was already loaded, reload it so the new plist takes effect.
+# Otherwise leave it unloaded — the user runs `pr-review-poller start` when ready.
+if launchctl list | awk '{print $3}' | grep -qx "com.kezoo.pr-review-poller"; then
+  launchctl unload "$PLIST_DST" 2>/dev/null || true
+  launchctl load   "$PLIST_DST"
+  RELOAD_MSG="reloaded (was already running)"
+else
+  RELOAD_MSG="not loaded — run 'pr-review-poller start' to begin polling"
+fi
 
 echo "Installed."
 echo "  interval:        ${INTERVAL_SECONDS}s"
@@ -52,3 +59,4 @@ echo "  bin:             $BIN_DST"
 echo "  plist:           $PLIST_DST"
 echo "  config:          $CONFIG_DIR/config.env"
 echo "  logs:            ~/worktrees/.pr-review-poller-{stdout,stderr}.log"
+echo "  status:          $RELOAD_MSG"

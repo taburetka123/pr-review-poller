@@ -1,43 +1,115 @@
 #!/usr/bin/env bash
-# Poll for PRs needing review and run `claude -p "/review-prs --auto"`.
-# Default: headless (invoked by launchd). --head: open an iTerm2 tab for debug.
+# Unattended PR auto-review. Subcommands: status | start | stop | run | logs | config | help.
+# Invoked by launchd as `pr-review-poller run` every N seconds.
 set -euo pipefail
 
 CONFIG_FILE="${PR_REVIEW_POLLER_CONFIG:-$HOME/.config/pr-review-poller/config.env}"
-if [[ -f "$CONFIG_FILE" ]]; then
-  # shellcheck disable=SC1090
-  source "$CONFIG_FILE"
-fi
-MIN_COMMIT_AGE="${MIN_COMMIT_AGE:-10m}"
-
-MODE="headless"
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --head) MODE="head"; shift ;;
-    --min-commit-age) MIN_COMMIT_AGE="$2"; shift 2 ;;
-    -h|--help)
-      cat <<EOF
-Usage: pr-review-poller [--head] [--min-commit-age DURATION]
-
-  --head                 Open an iTerm2 tab and run the review there (debug).
-                         Default is headless, writing to launchd stdout/stderr logs.
-  --min-commit-age DUR   Override the commit-age gate for this invocation.
-                         Format: 10m, 1h, 30m. 0 disables. Default from config ($MIN_COMMIT_AGE).
-
-Config file: $CONFIG_FILE
-EOF
-      exit 0
-      ;;
-    *) echo "unknown flag: $1" >&2; exit 2 ;;
-  esac
-done
-
+PLIST_DST="$HOME/Library/LaunchAgents/com.kezoo.pr-review-poller.plist"
+LABEL="com.kezoo.pr-review-poller"
+LOCK_FILE="$HOME/.local/state/pr-review-poller.lock"
+STDOUT_LOG="$HOME/worktrees/.pr-review-poller-stdout.log"
+STDERR_LOG="$HOME/worktrees/.pr-review-poller-stderr.log"
 CLAUDE="/Users/kezoo/.local/bin/claude"
-SLASH="/review-prs --auto --min-commit-age ${MIN_COMMIT_AGE}"
 
-if [[ "$MODE" == "head" ]]; then
-  # Debug: open a new iTerm2 tab, run there, no lock (user-invoked).
-  osascript <<OSA
+load_config() {
+  if [[ -f "$CONFIG_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+  fi
+  MIN_COMMIT_AGE="${MIN_COMMIT_AGE:-10m}"
+}
+
+cmd_help() {
+  cat <<EOF
+pr-review-poller — unattended PR auto-review
+
+Usage:
+  pr-review-poller [status]          Show timer state, config, last run
+  pr-review-poller start             Load the launchd job (begin polling)
+  pr-review-poller stop              Unload the launchd job (pause polling)
+  pr-review-poller run [--head]      Run one review cycle now
+                                     --head opens an iTerm2 tab (debug)
+  pr-review-poller run --min-commit-age DUR
+                                     Override the commit-age gate for this run
+  pr-review-poller logs [-n N]       Tail the stdout log (follow mode)
+  pr-review-poller config            Print current config
+  pr-review-poller help              This help
+
+Config:  $CONFIG_FILE
+Plist:   $PLIST_DST
+Logs:    $STDOUT_LOG
+         $STDERR_LOG
+See: \$HOME/projects/personal/pr-review-poller/README.md
+EOF
+}
+
+cmd_status() {
+  load_config
+  echo "=== pr-review-poller status ==="
+
+  if [[ -f "$PLIST_DST" ]]; then
+    INTERVAL=$(plutil -extract StartInterval raw "$PLIST_DST" 2>/dev/null || echo "?")
+    echo "plist:            $PLIST_DST (interval: ${INTERVAL}s)"
+  else
+    echo "plist:            MISSING — run install.sh to create"
+  fi
+
+  if launchctl list | awk '{print $3}' | grep -qx "$LABEL"; then
+    INFO=$(launchctl print "gui/$(id -u)/$LABEL" 2>&1)
+    STATE=$(echo "$INFO" | awk -F'= ' '/^\tstate / {print $2; exit}')
+    LAST_EXIT=$(echo "$INFO" | awk -F'= ' '/^\tlast exit code / {print $2; exit}')
+    echo "launchd:          loaded (state: ${STATE:-?}, last exit: ${LAST_EXIT:-?})"
+  else
+    echo "launchd:          not loaded (run 'pr-review-poller start')"
+  fi
+
+  if [[ -f "$LOCK_FILE" ]] && lsof -- "$LOCK_FILE" >/dev/null 2>&1; then
+    HOLDER_PID=$(lsof -t -- "$LOCK_FILE" | head -1)
+    echo "lock:             held by pid $HOLDER_PID (run in progress)"
+  else
+    echo "lock:             free"
+  fi
+
+  echo "config:           $CONFIG_FILE"
+  echo "  MIN_COMMIT_AGE: $MIN_COMMIT_AGE"
+
+  if [[ -f "$STDOUT_LOG" ]]; then
+    LAST=$(grep -E '^\[.*\] (poll start|poll done|previous run)' "$STDOUT_LOG" 2>/dev/null | tail -1 || echo "")
+    [[ -n "$LAST" ]] && echo "last log entry:   $LAST"
+  fi
+}
+
+cmd_start() {
+  if [[ ! -f "$PLIST_DST" ]]; then
+    echo "plist missing at $PLIST_DST — run install.sh first" >&2
+    exit 1
+  fi
+  launchctl unload "$PLIST_DST" 2>/dev/null || true
+  launchctl load "$PLIST_DST"
+  INTERVAL=$(plutil -extract StartInterval raw "$PLIST_DST" 2>/dev/null || echo "?")
+  echo "started (interval: ${INTERVAL}s). Next tick in ~${INTERVAL}s."
+}
+
+cmd_stop() {
+  launchctl unload "$PLIST_DST" 2>/dev/null || true
+  echo "stopped"
+}
+
+cmd_run() {
+  load_config
+  MODE="headless"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --head) MODE="head"; shift ;;
+      --min-commit-age) MIN_COMMIT_AGE="$2"; shift 2 ;;
+      *) echo "unknown flag: $1" >&2; exit 2 ;;
+    esac
+  done
+
+  SLASH="/review-prs --auto --min-commit-age ${MIN_COMMIT_AGE}"
+
+  if [[ "$MODE" == "head" ]]; then
+    osascript <<OSA
 tell application "iTerm"
   activate
   tell current window
@@ -48,18 +120,50 @@ tell application "iTerm"
   end tell
 end tell
 OSA
-  exit 0
-fi
+    exit 0
+  fi
 
-# Headless (launchd). Single-flight via flock.
-LOCK_FILE="$HOME/.local/state/pr-review-poller.lock"
-mkdir -p "$(dirname "$LOCK_FILE")"
-exec 200>"$LOCK_FILE"
-if ! flock -n 200; then
-  echo "[$(date -Iseconds)] previous run still active, skipping"
-  exit 0
-fi
+  mkdir -p "$(dirname "$LOCK_FILE")"
+  exec 200>"$LOCK_FILE"
+  if ! flock -n 200; then
+    echo "[$(date -Iseconds)] previous run still active, skipping"
+    exit 0
+  fi
 
-echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE)"
-"$CLAUDE" -p "$SLASH"
-echo "[$(date -Iseconds)] poll done"
+  echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE)"
+  "$CLAUDE" -p "$SLASH"
+  echo "[$(date -Iseconds)] poll done"
+}
+
+cmd_logs() {
+  if [[ ! -f "$STDOUT_LOG" ]]; then
+    echo "no log yet at $STDOUT_LOG" >&2
+    exit 1
+  fi
+  exec tail -F "$@" "$STDOUT_LOG"
+}
+
+cmd_config() {
+  load_config
+  if [[ -f "$CONFIG_FILE" ]]; then
+    echo "# $CONFIG_FILE"
+    cat "$CONFIG_FILE"
+  else
+    echo "no config file at $CONFIG_FILE (run install.sh)" >&2
+    exit 1
+  fi
+}
+
+SUB="${1:-status}"
+[[ $# -gt 0 ]] && shift
+
+case "$SUB" in
+  status) cmd_status "$@" ;;
+  start)  cmd_start  "$@" ;;
+  stop)   cmd_stop   "$@" ;;
+  run)    cmd_run    "$@" ;;
+  logs)   cmd_logs   "$@" ;;
+  config) cmd_config "$@" ;;
+  help|-h|--help) cmd_help ;;
+  *) echo "unknown subcommand: $SUB" >&2; cmd_help; exit 2 ;;
+esac
