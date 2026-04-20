@@ -77,6 +77,13 @@ cmd_status() {
     LAST=$(grep -E '^\[.*\] (poll start|poll done|previous run)' "$STDOUT_LOG" 2>/dev/null | tail -1 || echo "")
     [[ -n "$LAST" ]] && echo "last log entry:   $LAST"
   fi
+
+  HELD="$HOME/.local/state/pr-review-poller/held.json"
+  if [[ -f "$HELD" ]] && [[ $(jq 'length' "$HELD" 2>/dev/null || echo 0) -gt 0 ]]; then
+    echo
+    echo "held (waiting for human review):"
+    jq -r 'to_entries[] | "  \(.key)\n    commit \(.value.commit[:7]), held \(.value.held_at)\n    \(.value.reason)\n    \(.value.pr_url)"' "$HELD"
+  fi
 }
 
 cmd_start() {

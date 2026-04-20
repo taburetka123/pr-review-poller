@@ -4,14 +4,25 @@ Background launchd job that runs `claude -p "/review-prs --auto"` on a timer so 
 
 Pairs with the `--auto` mode on the personal `/review-prs` skill — which only posts confidence-5 blocker/major findings, approves otherwise, and silently drops everything else.
 
+## What auto mode does per PR
+
+Three possible actions:
+
+- **POST** — submit a GitHub `COMMENT` review with inline findings. Only used when a `blocker` or `major` finding clears the author's post threshold (see trust matrix in the `/review-prs` skill).
+- **HOLD** — don't touch GitHub. Record the PR in a local ledger (`~/.local/state/pr-review-poller/held.json`) and DM yourself on Slack with the full review so you can decide. The PR is skipped on subsequent polls (until new commits) so you aren't spammed.
+- **APPROVE** — submit an `APPROVE` review with an empty body. No text, no noise.
+
+Trust is per-author: high-trust teammates never HOLD (only POST or APPROVE); low-trust teammates HOLD on borderline findings instead of auto-approving.
+
 ## Safety gates
 
-Four layered checks prevent duplicate reviews, mid-push reviews, and beating humans to the draw:
+Five layered checks prevent duplicate reviews, mid-push reviews, and beating humans to the draw:
 
 1. **Single-flight lock** — `flock` on `~/.local/state/pr-review-poller.lock`. If a previous poll is still running, the new one exits.
 2. **Last-review-commit dedup** — the skill's Phase 1 skips any PR where your last review was on the current head commit. Re-review runs only when the head has moved.
 3. **Already-approved skip** — if any reviewer's latest review state is `APPROVED`, the skill skips the PR in auto mode. No piling on with comments after someone greenlit it.
 4. **Commit-age gate** — a PR is only reviewed once its newest commit is ≥ `MIN_COMMIT_AGE` old (default 10 min). Gives humans a lead window and avoids reviewing mid-push.
+5. **Held-ledger skip** — a PR currently marked HOLD at the current HEAD is skipped. When new commits land (HEAD moves), the entry goes stale and the PR is re-evaluated.
 
 ## Install
 
