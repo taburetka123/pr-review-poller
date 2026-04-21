@@ -8,7 +8,7 @@ Pairs with the `--auto` mode on the personal `/kezoo-review-prs` skill — which
 
 Three possible actions:
 
-- **POST** — submit a GitHub `COMMENT` review with inline findings. Only used when a `blocker` or `major` finding clears the author's post threshold (see trust matrix in the `/kezoo-review-prs` skill).
+- **POST** — leave each finding as a **standalone inline PR comment** (not wrapped in a review submission) so the timeline gets per-comment "commented on" entries instead of a "reviewed changes" block. Every body is footer-tagged `*Automated review*` so humans can tell the source. Only used when a `blocker` or `major` finding clears the author's post threshold (see trust matrix in the `/kezoo-review-prs` skill).
 - **HOLD** — don't touch GitHub. Record the PR in a local ledger (`~/.local/state/pr-review-poller/held.json`) and DM yourself on Slack with the full review so you can decide. The PR is skipped on subsequent polls (until new commits) so you aren't spammed.
 - **APPROVE** — submit an `APPROVE` review with an empty body. No text, no noise.
 
@@ -56,6 +56,8 @@ Ad-hoc override:
 
 ```
 pr-review-poller run --min-commit-age 0   # disable age gate for this single run
+pr-review-poller run --no-post            # POST decisions become HOLD for this run
+                                          # (APPROVE still approves; nothing posts to GitHub)
 ```
 
 ## Uninstall

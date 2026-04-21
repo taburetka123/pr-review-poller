@@ -31,6 +31,8 @@ Usage:
                                      --head opens an iTerm2 tab (debug)
   pr-review-poller run --min-commit-age DUR
                                      Override the commit-age gate for this run
+  pr-review-poller run --no-post     Hold decisions that would normally POST;
+                                     only HOLD or APPROVE for this run
   pr-review-poller logs [-n N]       Tail the stdout log (follow mode)
   pr-review-poller config            Print current config
   pr-review-poller help              This help
@@ -105,15 +107,18 @@ cmd_stop() {
 cmd_run() {
   load_config
   MODE="headless"
+  NO_POST=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --head) MODE="head"; shift ;;
       --min-commit-age) MIN_COMMIT_AGE="$2"; shift 2 ;;
+      --no-post) NO_POST=1; shift ;;
       *) echo "unknown flag: $1" >&2; exit 2 ;;
     esac
   done
 
   SLASH="/kezoo-review-prs --auto --min-commit-age ${MIN_COMMIT_AGE}"
+  [[ "$NO_POST" == "1" ]] && SLASH="$SLASH --no-post"
 
   if [[ "$MODE" == "head" ]]; then
     osascript <<OSA
@@ -137,7 +142,7 @@ OSA
     exit 0
   fi
 
-  echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE)"
+  echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE, no-post=$NO_POST)"
   "$CLAUDE" -p "$SLASH"
   echo "[$(date -Iseconds)] poll done"
 }
