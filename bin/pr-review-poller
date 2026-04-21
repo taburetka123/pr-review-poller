@@ -26,6 +26,9 @@ pr-review-poller — unattended PR auto-review
 Usage:
   pr-review-poller [status]          Show timer state, config, last run
   pr-review-poller start             Load the launchd job (begin polling)
+  pr-review-poller start [--no-post] [--min-commit-age DUR]
+                                     Start with flags baked into the plist's
+                                     job args so every tick uses them
   pr-review-poller stop              Unload the launchd job (pause polling)
   pr-review-poller run [--head]      Run one review cycle now
                                      --head opens an iTerm2 tab (debug)
@@ -51,7 +54,10 @@ cmd_status() {
 
   if [[ -f "$PLIST_DST" ]]; then
     INTERVAL=$(plutil -extract StartInterval raw "$PLIST_DST" 2>/dev/null || echo "?")
+    JOB_ARGS=$(plutil -extract ProgramArguments json -o - "$PLIST_DST" 2>/dev/null | \
+      jq -r '.[1:] | join(" ")' 2>/dev/null || echo "run")
     echo "plist:            $PLIST_DST (interval: ${INTERVAL}s)"
+    echo "  job args:       $JOB_ARGS"
   else
     echo "plist:            MISSING — run install.sh to create"
   fi
@@ -93,10 +99,33 @@ cmd_start() {
     echo "plist missing at $PLIST_DST — run install.sh first" >&2
     exit 1
   fi
+
+  # Flags here rewrite the plist's ProgramArguments so every launchd tick runs
+  # `pr-review-poller run <flags>`. Without flags, the existing plist is left
+  # alone (so `start` after a prior `start --no-post` preserves no-post mode).
+  local NO_POST_FLAG=0 MIN_AGE_FLAG="" had_flag=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-post) NO_POST_FLAG=1; had_flag=1; shift ;;
+      --min-commit-age) MIN_AGE_FLAG="$2"; had_flag=1; shift 2 ;;
+      *) echo "unknown flag: $1" >&2; exit 2 ;;
+    esac
+  done
+
+  if [[ "$had_flag" == "1" ]]; then
+    local args_json="[\"$HOME/.local/bin/pr-review-poller\",\"run\""
+    [[ -n "$MIN_AGE_FLAG" ]] && args_json="$args_json,\"--min-commit-age\",\"$MIN_AGE_FLAG\""
+    [[ "$NO_POST_FLAG" == "1" ]] && args_json="$args_json,\"--no-post\""
+    args_json="$args_json]"
+    plutil -replace ProgramArguments -json "$args_json" "$PLIST_DST"
+  fi
+
   launchctl unload "$PLIST_DST" 2>/dev/null || true
   launchctl load "$PLIST_DST"
   INTERVAL=$(plutil -extract StartInterval raw "$PLIST_DST" 2>/dev/null || echo "?")
-  echo "started (interval: ${INTERVAL}s). Next tick in ~${INTERVAL}s."
+  JOB_ARGS=$(plutil -extract ProgramArguments json -o - "$PLIST_DST" 2>/dev/null | \
+    jq -r '.[1:] | join(" ")' 2>/dev/null || echo "run")
+  echo "started (interval: ${INTERVAL}s, job args: ${JOB_ARGS}). Next tick in ~${INTERVAL}s."
 }
 
 cmd_stop() {
