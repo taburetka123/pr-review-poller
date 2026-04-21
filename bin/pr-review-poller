@@ -71,9 +71,13 @@ cmd_status() {
     echo "launchd:          not loaded (run 'pr-review-poller start')"
   fi
 
-  if [[ -f "$LOCK_FILE" ]] && lsof -- "$LOCK_FILE" >/dev/null 2>&1; then
-    HOLDER_PID=$(lsof -t -- "$LOCK_FILE" | head -1)
-    echo "lock:             held by pid $HOLDER_PID (run in progress)"
+  if [[ -f "$LOCK_FILE" ]]; then
+    HOLDER_PID=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+    if [[ -n "$HOLDER_PID" ]] && kill -0 "$HOLDER_PID" 2>/dev/null; then
+      echo "lock:             held by pid $HOLDER_PID (run in progress)"
+    else
+      echo "lock:             stale (pid ${HOLDER_PID:-?} no longer running)"
+    fi
   else
     echo "lock:             free"
   fi
@@ -164,12 +168,17 @@ OSA
     exit 0
   fi
 
+  # PID-file lock (macOS has no flock). Self-heals after crashes via kill -0.
   mkdir -p "$(dirname "$LOCK_FILE")"
-  exec 200>"$LOCK_FILE"
-  if ! flock -n 200; then
-    echo "[$(date -Iseconds)] previous run still active, skipping"
-    exit 0
+  if [[ -f "$LOCK_FILE" ]]; then
+    OLD_PID=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+    if [[ -n "$OLD_PID" ]] && kill -0 "$OLD_PID" 2>/dev/null; then
+      echo "[$(date -Iseconds)] previous run still active (pid $OLD_PID), skipping"
+      exit 0
+    fi
   fi
+  echo $$ > "$LOCK_FILE"
+  trap 'rm -f "$LOCK_FILE"' EXIT
 
   echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE, no-post=$NO_POST)"
   "$CLAUDE" -p "$SLASH"
