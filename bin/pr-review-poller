@@ -180,8 +180,16 @@ OSA
   echo $$ > "$LOCK_FILE"
   trap 'rm -f "$LOCK_FILE"' EXIT
 
-  echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE, no-post=$NO_POST)"
-  "$CLAUDE" -p "$SLASH"
+  # gh CLI picks the active account from the git remote of the cwd (dir-scoped
+  # auth). From $HOME, the wrong account is active and PR discovery returns
+  # nothing. Run from a known work repo so the work gh account is picked up.
+  WORK_CWD="${PR_REVIEW_POLLER_WORK_CWD:-$HOME/projects/work/otto-service-requests-service}"
+  if [[ ! -d "$WORK_CWD/.git" ]]; then
+    echo "[$(date -Iseconds)] work cwd not a git repo: $WORK_CWD — gh may use the wrong account" >&2
+  fi
+
+  echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE, no-post=$NO_POST, cwd=$WORK_CWD)"
+  ( cd "$WORK_CWD" && "$CLAUDE" -p "$SLASH" )
   echo "[$(date -Iseconds)] poll done"
 }
 
