@@ -159,6 +159,7 @@ tell application "iTerm"
   activate
   tell current window
     create tab with default profile
+    delay 0.6
     tell current session of current tab
       write text "$CLAUDE -p \"$SLASH\""
     end tell
