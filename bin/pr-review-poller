@@ -26,7 +26,7 @@ pr-review-poller — unattended PR auto-review
 Usage:
   pr-review-poller [status]          Show timer state, config, last run
   pr-review-poller start             Load the launchd job (begin polling)
-  pr-review-poller start [--no-post] [--min-commit-age DUR]
+  pr-review-poller start [--post] [--min-commit-age DUR]
                                      Start with flags baked into the plist's
                                      job args so every tick uses them
   pr-review-poller stop              Unload the launchd job (pause polling)
@@ -34,8 +34,9 @@ Usage:
                                      --head opens an iTerm2 tab (debug)
   pr-review-poller run --min-commit-age DUR
                                      Override the commit-age gate for this run
-  pr-review-poller run --no-post     Hold decisions that would normally POST;
-                                     only HOLD or APPROVE for this run
+  pr-review-poller run --post        Allow posting for this run. Default is
+                                     no-post: POST decisions become HOLD;
+                                     APPROVE still approves
   pr-review-poller logs [-n N]       Tail the stdout log (follow mode)
   pr-review-poller config            Print current config
   pr-review-poller help              This help
@@ -106,11 +107,11 @@ cmd_start() {
 
   # Flags here rewrite the plist's ProgramArguments so every launchd tick runs
   # `pr-review-poller run <flags>`. Without flags, the existing plist is left
-  # alone (so `start` after a prior `start --no-post` preserves no-post mode).
-  local NO_POST_FLAG=0 MIN_AGE_FLAG="" had_flag=0
+  # alone (so `start` after a prior `start --post` preserves posting mode).
+  local POST_FLAG=0 MIN_AGE_FLAG="" had_flag=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --no-post) NO_POST_FLAG=1; had_flag=1; shift ;;
+      --post) POST_FLAG=1; had_flag=1; shift ;;
       --min-commit-age) MIN_AGE_FLAG="$2"; had_flag=1; shift 2 ;;
       *) echo "unknown flag: $1" >&2; exit 2 ;;
     esac
@@ -119,7 +120,7 @@ cmd_start() {
   if [[ "$had_flag" == "1" ]]; then
     local args_json="[\"$HOME/.local/bin/pr-review-poller\",\"run\""
     [[ -n "$MIN_AGE_FLAG" ]] && args_json="$args_json,\"--min-commit-age\",\"$MIN_AGE_FLAG\""
-    [[ "$NO_POST_FLAG" == "1" ]] && args_json="$args_json,\"--no-post\""
+    [[ "$POST_FLAG" == "1" ]] && args_json="$args_json,\"--post\""
     args_json="$args_json]"
     plutil -replace ProgramArguments -json "$args_json" "$PLIST_DST"
   fi
@@ -261,18 +262,18 @@ filter_prs() {
 cmd_run() {
   load_config
   MODE="headless"
-  NO_POST=0
+  POST=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --head) MODE="head"; shift ;;
       --min-commit-age) MIN_COMMIT_AGE="$2"; shift 2 ;;
-      --no-post) NO_POST=1; shift ;;
+      --post) POST=1; shift ;;
       *) echo "unknown flag: $1" >&2; exit 2 ;;
     esac
   done
 
   SLASH="/kezoo-review-prs --auto --min-commit-age ${MIN_COMMIT_AGE}"
-  [[ "$NO_POST" == "1" ]] && SLASH="$SLASH --no-post"
+  [[ "$POST" == "1" ]] && SLASH="$SLASH --post"
 
   if [[ "$MODE" == "head" ]]; then
     osascript <<OSA
@@ -311,7 +312,7 @@ OSA
     exit 0
   fi
 
-  echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE, no-post=$NO_POST, cwd=$WORK_CWD)"
+  echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE, post=$POST, cwd=$WORK_CWD)"
 
   # Phase 1 in bash: only invoke Claude when ≥1 PR survives all filters.
   # filter_prs populates FILTER_SURVIVORS and prints skip reasons to stdout.

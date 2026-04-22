@@ -56,8 +56,8 @@ Ad-hoc override:
 
 ```
 pr-review-poller run --min-commit-age 0   # disable age gate for this single run
-pr-review-poller run --no-post            # POST decisions become HOLD for this run
-                                          # (APPROVE still approves; nothing posts to GitHub)
+pr-review-poller run --post               # allow posting. Default is no-post:
+                                          # POST decisions become HOLD, APPROVE still approves
 ```
 
 ## Uninstall
