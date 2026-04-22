@@ -16,9 +16,9 @@ Trust is per-author: high-trust teammates never HOLD (only POST or APPROVE); low
 
 ## Safety gates
 
-Five layered checks prevent duplicate reviews, mid-push reviews, and beating humans to the draw:
+Five layered checks prevent duplicate reviews, mid-push reviews, and beating humans to the draw. **All five run in the shell script before Claude is invoked** — on a tick where every PR is filtered out (the common case), no Claude session starts at all, so empty ticks cost nothing:
 
-1. **Single-flight lock** — `flock` on `~/.local/state/pr-review-poller.lock`. If a previous poll is still running, the new one exits.
+1. **Single-flight lock** — PID file at `~/.local/state/pr-review-poller.lock`. If a previous poll is still running, the new one exits; stale locks (process gone) are reclaimed.
 2. **Last-review-commit dedup** — the skill's Phase 1 skips any PR where your last review was on the current head commit. Re-review runs only when the head has moved.
 3. **Already-approved skip** — if any reviewer's latest review state is `APPROVED`, the skill skips the PR in auto mode. No piling on with comments after someone greenlit it.
 4. **Commit-age gate** — a PR is only reviewed once its newest commit is ≥ `MIN_COMMIT_AGE` old (default 10 min). Gives humans a lead window and avoids reviewing mid-push.

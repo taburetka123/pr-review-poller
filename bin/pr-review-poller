@@ -137,6 +137,127 @@ cmd_stop() {
   echo "stopped"
 }
 
+duration_to_seconds() {
+  case "$1" in
+    0)  echo 0 ;;
+    *m) echo $(( ${1%m} * 60 )) ;;
+    *h) echo $(( ${1%h} * 3600 )) ;;
+    *)  return 1 ;;
+  esac
+}
+
+# Phase 1 discovery + filtering. Same logic as ~/.claude/skills/kezoo-review-prs/SKILL.md
+# Phase 1, pulled into bash so empty/all-skipped ticks don't burn Claude tokens.
+# Writes surviving PR URLs into the FILTER_SURVIVORS array (caller reads it).
+# Prints "  skip #N: <reason>" log lines to stdout so the poller log captures them.
+FILTER_SURVIVORS=()
+filter_prs() {
+  FILTER_SURVIVORS=()
+  local me="aleksandr-beliakov-rs"
+  local ledger="$HOME/.local/state/pr-review-poller/held.json"
+  local now_epoch; now_epoch=$(date +%s)
+  local min_seconds; min_seconds=$(duration_to_seconds "$MIN_COMMIT_AGE") || {
+    echo "invalid --min-commit-age: $MIN_COMMIT_AGE" >&2
+    return 2
+  }
+
+  # Mirrors the team-members list in ~/.claude/skills/kezoo-review-prs/SKILL.md.
+  # Keep in sync when the skill's team changes.
+  local team=(aleksandr-beliakov-rs artem-saidanov-rs dmitry-indikeev-rs alexandra-vorobyeva-rs)
+
+  local raw
+  if ! raw=$(gh search prs --review-requested=@me --state=open --limit=50 \
+      --json number,title,repository,author 2>&1); then
+    echo "gh search failed: $raw" >&2
+    return 1
+  fi
+  if [[ -z "$raw" || "$raw" == "[]" ]]; then
+    return 0
+  fi
+
+  while IFS=$'\t' read -r owner repo number author; do
+    [[ -z "$number" ]] && continue
+
+    # 1. Team-author filter
+    local in_team=0
+    for t in "${team[@]}"; do
+      [[ "$t" == "$author" ]] && { in_team=1; break; }
+    done
+    if [[ "$in_team" == "0" ]]; then
+      echo "  skip #$number ($owner/$repo): author $author not on team"
+      continue
+    fi
+
+    # 2. Repo-cloned check
+    if [[ ! -d "$HOME/projects/work/$repo" ]]; then
+      echo "  skip #$number ($owner/$repo): ~/projects/work/$repo not cloned"
+      continue
+    fi
+
+    # 3. Single gh pr view for all remaining filters
+    local info
+    if ! info=$(gh pr view "$number" -R "$owner/$repo" --json reviews,commits 2>&1); then
+      echo "  skip #$number ($owner/$repo): gh pr view failed ($info)"
+      continue
+    fi
+
+    local head_oid committed_at
+    head_oid=$(echo "$info" | jq -r '.commits[-1].oid' 2>/dev/null)
+    committed_at=$(echo "$info" | jq -r '.commits[-1].committedDate' 2>/dev/null)
+    if [[ -z "$head_oid" || "$head_oid" == "null" ]]; then
+      echo "  skip #$number ($owner/$repo): could not parse HEAD commit"
+      continue
+    fi
+
+    # 4. Commit-age gate
+    local committed_epoch age
+    committed_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$committed_at" +%s 2>/dev/null)
+    if [[ -z "$committed_epoch" ]]; then
+      echo "  skip #$number ($owner/$repo): could not parse committedDate $committed_at"
+      continue
+    fi
+    age=$(( now_epoch - committed_epoch ))
+    if [[ "$age" -lt "$min_seconds" ]]; then
+      echo "  skip #$number ($owner/$repo): newest commit is ${age}s old, below ${min_seconds}s threshold"
+      continue
+    fi
+
+    # 5. Last-review-commit dedup
+    local my_last_oid
+    my_last_oid=$(echo "$info" | jq -r --arg me "$me" \
+      '[.reviews[] | select(.author.login == $me)] | last | .commit.oid // empty' 2>/dev/null)
+    if [[ -n "$my_last_oid" && "$my_last_oid" == "$head_oid" ]]; then
+      echo "  skip #$number ($owner/$repo): already reviewed at HEAD ${head_oid:0:7}"
+      continue
+    fi
+
+    # 6. Already-approved-by-anyone skip
+    local approved
+    approved=$(echo "$info" | jq '[.reviews | group_by(.author.login)[] | max_by(.submittedAt) | select(.state == "APPROVED")] | length > 0' 2>/dev/null)
+    if [[ "$approved" == "true" ]]; then
+      echo "  skip #$number ($owner/$repo): already approved by another reviewer"
+      continue
+    fi
+
+    # 7. Held-ledger skip
+    if [[ -f "$ledger" ]]; then
+      local held_commit
+      held_commit=$(jq -r --arg key "$owner/$repo#$number" '.[$key].commit // empty' "$ledger" 2>/dev/null)
+      if [[ "$held_commit" == "$head_oid" ]]; then
+        echo "  skip #$number ($owner/$repo): held at HEAD ${head_oid:0:7} pending human review"
+        continue
+      fi
+    fi
+
+    FILTER_SURVIVORS+=("https://github.com/$owner/$repo/pull/$number")
+  done < <(echo "$raw" | jq -r '.[] | [
+      (.repository.nameWithOwner | split("/")[0]),
+      (.repository.nameWithOwner | split("/")[1]),
+      (.number | tostring),
+      .author.login
+    ] | @tsv')
+}
+
 cmd_run() {
   load_config
   MODE="headless"
@@ -185,12 +306,28 @@ OSA
   # auth). From $HOME, the wrong account is active and PR discovery returns
   # nothing. Run from a known work repo so the work gh account is picked up.
   WORK_CWD="${PR_REVIEW_POLLER_WORK_CWD:-$HOME/projects/work/otto-service-requests-service}"
-  if [[ ! -d "$WORK_CWD/.git" ]]; then
-    echo "[$(date -Iseconds)] work cwd not a git repo: $WORK_CWD — gh may use the wrong account" >&2
+  if ! cd "$WORK_CWD" 2>/dev/null; then
+    echo "[$(date -Iseconds)] work cwd missing ($WORK_CWD), skipping tick"
+    exit 0
   fi
 
   echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE, no-post=$NO_POST, cwd=$WORK_CWD)"
-  ( cd "$WORK_CWD" && "$CLAUDE" -p "$SLASH" )
+
+  # Phase 1 in bash: only invoke Claude when ≥1 PR survives all filters.
+  # filter_prs populates FILTER_SURVIVORS and prints skip reasons to stdout.
+  if ! filter_prs; then
+    echo "[$(date -Iseconds)] filter failed, skipping tick"
+    exit 0
+  fi
+
+  if [[ ${#FILTER_SURVIVORS[@]} -eq 0 ]]; then
+    echo "[$(date -Iseconds)] no PRs survived filters, skipping claude invocation"
+    echo "[$(date -Iseconds)] poll done"
+    exit 0
+  fi
+
+  echo "[$(date -Iseconds)] invoking claude with ${#FILTER_SURVIVORS[@]} PR(s): ${FILTER_SURVIVORS[*]}"
+  "$CLAUDE" -p "$SLASH ${FILTER_SURVIVORS[*]}"
   echo "[$(date -Iseconds)] poll done"
 }
 
