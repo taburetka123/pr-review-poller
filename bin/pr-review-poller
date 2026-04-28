@@ -19,6 +19,25 @@ load_config() {
   MIN_COMMIT_AGE="${MIN_COMMIT_AGE:-10m}"
 }
 
+# Pretty-print whichever scheduling key the plist uses. StartCalendarInterval
+# catches up on wake (one coalesced run); StartInterval does not.
+plist_schedule() {
+  local plist="$1"
+  local interval cal
+  if interval=$(plutil -extract StartInterval raw "$plist" 2>/dev/null); then
+    echo "every ${interval}s (StartInterval — no catch-up after sleep)"
+    return
+  fi
+  if cal=$(plutil -extract StartCalendarInterval json -o - "$plist" 2>/dev/null); then
+    local minute hour
+    minute=$(echo "$cal" | jq -r '.Minute // "*"' 2>/dev/null)
+    hour=$(echo "$cal" | jq -r '.Hour // "*"' 2>/dev/null)
+    echo "calendar: hour=$hour minute=$minute (catches up on wake)"
+    return
+  fi
+  echo "unknown (no StartInterval or StartCalendarInterval)"
+}
+
 cmd_help() {
   cat <<EOF
 pr-review-poller — unattended PR auto-review
@@ -54,10 +73,11 @@ cmd_status() {
   echo "=== pr-review-poller status ==="
 
   if [[ -f "$PLIST_DST" ]]; then
-    INTERVAL=$(plutil -extract StartInterval raw "$PLIST_DST" 2>/dev/null || echo "?")
+    SCHEDULE=$(plist_schedule "$PLIST_DST")
     JOB_ARGS=$(plutil -extract ProgramArguments json -o - "$PLIST_DST" 2>/dev/null | \
       jq -r '.[1:] | join(" ")' 2>/dev/null || echo "run")
-    echo "plist:            $PLIST_DST (interval: ${INTERVAL}s)"
+    echo "plist:            $PLIST_DST"
+    echo "  schedule:       $SCHEDULE"
     echo "  job args:       $JOB_ARGS"
   else
     echo "plist:            MISSING — run install.sh to create"
@@ -127,10 +147,10 @@ cmd_start() {
 
   launchctl unload "$PLIST_DST" 2>/dev/null || true
   launchctl load "$PLIST_DST"
-  INTERVAL=$(plutil -extract StartInterval raw "$PLIST_DST" 2>/dev/null || echo "?")
+  SCHEDULE=$(plist_schedule "$PLIST_DST")
   JOB_ARGS=$(plutil -extract ProgramArguments json -o - "$PLIST_DST" 2>/dev/null | \
     jq -r '.[1:] | join(" ")' 2>/dev/null || echo "run")
-  echo "started (interval: ${INTERVAL}s, job args: ${JOB_ARGS}). Next tick in ~${INTERVAL}s."
+  echo "started (schedule: $SCHEDULE, job args: $JOB_ARGS)."
 }
 
 cmd_stop() {
@@ -303,16 +323,25 @@ OSA
   echo $$ > "$LOCK_FILE"
   trap 'rm -f "$LOCK_FILE"' EXIT
 
-  # gh CLI picks the active account from the git remote of the cwd (dir-scoped
-  # auth). From $HOME, the wrong account is active and PR discovery returns
-  # nothing. Run from a known work repo so the work gh account is picked up.
+  # cd to a work repo so any gh subcommand that reads remotes (gh pr view) lines
+  # up with the right repo. The active gh account is forced via GH_TOKEN below.
   WORK_CWD="${PR_REVIEW_POLLER_WORK_CWD:-$HOME/projects/work/otto-service-requests-service}"
   if ! cd "$WORK_CWD" 2>/dev/null; then
     echo "[$(date -Iseconds)] work cwd missing ($WORK_CWD), skipping tick"
     exit 0
   fi
 
-  echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE, post=$POST, cwd=$WORK_CWD)"
+  # gh's active account is global, not cwd-scoped — under launchd it resolves to
+  # the personal account, so `--review-requested=@me` returns nothing. Pull the
+  # work-account token from the keyring and export it for this run only.
+  WORK_GH_USER="${PR_REVIEW_POLLER_GH_USER:-aleksandr-beliakov-rs}"
+  if ! GH_TOKEN=$(gh auth token --user "$WORK_GH_USER" -h github.com 2>&1); then
+    echo "[$(date -Iseconds)] could not get gh token for $WORK_GH_USER: $GH_TOKEN"
+    exit 0
+  fi
+  export GH_TOKEN
+
+  echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE, post=$POST, cwd=$WORK_CWD, gh_user=$WORK_GH_USER)"
 
   # Phase 1 in bash: only invoke Claude when ≥1 PR survives all filters.
   # filter_prs populates FILTER_SURVIVORS and prints skip reasons to stdout.

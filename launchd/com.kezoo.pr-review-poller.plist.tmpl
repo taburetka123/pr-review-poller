@@ -9,8 +9,11 @@
         <string>/Users/kezoo/.local/bin/pr-review-poller</string>
         <string>run</string>
     </array>
-    <key>StartInterval</key>
-    <integer>{{INTERVAL_SECONDS}}</integer>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
     <key>StandardOutPath</key>
     <string>/Users/kezoo/worktrees/.pr-review-poller-stdout.log</string>
     <key>StandardErrorPath</key>

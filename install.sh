@@ -3,21 +3,20 @@
 # Idempotent: re-run to change interval or commit-age.
 set -euo pipefail
 
-INTERVAL_SECONDS=600
 MIN_COMMIT_AGE="10m"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --interval) INTERVAL_SECONDS="$2"; shift 2 ;;
     --min-commit-age) MIN_COMMIT_AGE="$2"; shift 2 ;;
     -h|--help)
       cat <<EOF
-Usage: ./install.sh [--interval SECONDS] [--min-commit-age DURATION]
+Usage: ./install.sh [--min-commit-age DURATION]
 
-  --interval SECONDS     launchd poll interval. Default 600 (10 min).
-                         Re-run to change.
   --min-commit-age DUR   Minimum age of the newest commit before auto-review
                          fires. 10m, 1h, etc. 0 disables. Default 10m.
+
+The launchd job fires hourly at minute 0 (StartCalendarInterval). If the
+Mac is asleep at that time, it runs on next wake (one coalesced catch-up).
 EOF
       exit 0
       ;;
@@ -39,8 +38,7 @@ cat > "$CONFIG_DIR/config.env" <<EOF
 MIN_COMMIT_AGE="$MIN_COMMIT_AGE"
 EOF
 
-sed "s|{{INTERVAL_SECONDS}}|$INTERVAL_SECONDS|g" \
-  "$REPO_DIR/launchd/com.kezoo.pr-review-poller.plist.tmpl" > "$PLIST_DST"
+cp "$REPO_DIR/launchd/com.kezoo.pr-review-poller.plist.tmpl" "$PLIST_DST"
 
 # If the job was already loaded, reload it so the new plist takes effect.
 # Otherwise leave it unloaded — the user runs `pr-review-poller start` when ready.
@@ -53,7 +51,7 @@ else
 fi
 
 echo "Installed."
-echo "  interval:        ${INTERVAL_SECONDS}s"
+echo "  schedule:        hourly at minute 0 (StartCalendarInterval)"
 echo "  min-commit-age:  $MIN_COMMIT_AGE"
 echo "  bin:             $BIN_DST"
 echo "  plist:           $PLIST_DST"
