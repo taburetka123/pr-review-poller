@@ -400,14 +400,19 @@ OSA
        "$LEDGER" > "$_tmp" && mv "$_tmp" "$LEDGER"
   done
 
-  echo "[$(date -Iseconds)] invoking claude with ${#_pr_urls[@]} PR(s): ${_pr_urls[*]}"
+  # Effort: medium is plenty for rule-driven triage (blocker = clearly broken;
+  # major conf 5 = high-confidence broken). Higher effort just means longer
+  # wall-time per tick, raising the odds of sleeping mid-review. Model stays
+  # at the binary default (Opus) — at ~3 reviews/day, cost isn't the lever.
+  CLAUDE_FLAGS=(--effort medium)
+  echo "[$(date -Iseconds)] invoking claude (${CLAUDE_FLAGS[*]}) with ${#_pr_urls[@]} PR(s): ${_pr_urls[*]}"
   # Disable -e around claude so rate-limit / non-zero exit becomes a logged
   # outcome instead of a silent script death (which would leave the next tick
   # to infer "no 'poll done' line ⇒ probably rate-limited"). Survivors keep
   # their [in-flight] ledger entries either way — that's what protects against
   # retry — but the log should say so out loud.
   local rc=0
-  "$CLAUDE" -p "$SLASH ${_pr_urls[*]}" || rc=$?
+  "$CLAUDE" "${CLAUDE_FLAGS[@]}" -p "$SLASH ${_pr_urls[*]}" || rc=$?
   if [[ $rc -ne 0 ]]; then
     echo "[$(date -Iseconds)] poll FAILED — claude exited rc=$rc; ${#_pr_urls[@]} PR(s) remain in-flight, no retry until new commits or 'pr-review-poller clear-hold'"
     exit "$rc"
