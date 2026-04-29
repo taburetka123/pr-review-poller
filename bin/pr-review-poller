@@ -63,6 +63,9 @@ Usage:
                                      full URL (https://github.com/o/r/pull/N)
                                      or a bare number (must be unique across
                                      repos)
+  pr-review-poller clear-hold <pr>   Remove a PR's held-ledger entry so the
+                                     next tick re-reviews it. <pr> is a URL
+                                     or bare number
   pr-review-poller config            Print current config
   pr-review-poller help              This help
 
@@ -267,17 +270,28 @@ filter_prs() {
       continue
     fi
 
-    # 7. Held-ledger skip
+    # 7. Held-ledger skip. Two flavours of entry:
+    #   - real HOLD written by the skill — "pending human review"
+    #   - "[in-flight]" placeholder written by cmd_run before invoking claude
+    #     so a mid-review crash (rate-limit, etc.) doesn't burn a retry next
+    #     tick. User clears via `pr-review-poller clear-hold <pr>`.
     if [[ -f "$ledger" ]]; then
-      local held_commit
+      local held_commit held_reason
       held_commit=$(jq -r --arg key "$owner/$repo#$number" '.[$key].commit // empty' "$ledger" 2>/dev/null)
+      held_reason=$(jq -r --arg key "$owner/$repo#$number" '.[$key].reason // empty' "$ledger" 2>/dev/null)
       if [[ "$held_commit" == "$head_oid" ]]; then
-        echo "  skip #$number ($owner/$repo): held at HEAD ${head_oid:0:7} pending human review"
+        if [[ "$held_reason" == \[in-flight\]* ]]; then
+          echo "  skip #$number ($owner/$repo): in-flight entry at HEAD ${head_oid:0:7} (clear-hold to retry)"
+        else
+          echo "  skip #$number ($owner/$repo): held at HEAD ${head_oid:0:7} pending human review"
+        fi
         continue
       fi
     fi
 
-    FILTER_SURVIVORS+=("https://github.com/$owner/$repo/pull/$number")
+    # Tab-separated tuple so cmd_run can pre-write in-flight ledger entries
+    # before invoking claude (needs head_oid, not just URL).
+    FILTER_SURVIVORS+=("$owner"$'\t'"$repo"$'\t'"$number"$'\t'"$head_oid"$'\t'"https://github.com/$owner/$repo/pull/$number")
   done < <(echo "$raw" | jq -r '.[] | [
       (.repository.nameWithOwner | split("/")[0]),
       (.repository.nameWithOwner | split("/")[1]),
@@ -363,8 +377,31 @@ OSA
     exit 0
   fi
 
-  echo "[$(date -Iseconds)] invoking claude with ${#FILTER_SURVIVORS[@]} PR(s): ${FILTER_SURVIVORS[*]}"
-  "$CLAUDE" -p "$SLASH ${FILTER_SURVIVORS[*]}"
+  # Pre-write an "[in-flight]" ledger entry per survivor BEFORE invoking claude.
+  # The skill's HOLD path overwrites with the real entry (same key); POST/APPROVE
+  # deletes it on success. If claude crashes mid-review (rate limit, etc.) the
+  # placeholder persists, so the next tick's filter step 7 skips this exact
+  # (PR, commit) instead of burning another retry. User runs
+  # `pr-review-poller clear-hold <pr>` to force a re-review.
+  local LEDGER="$HOME/.local/state/pr-review-poller/held.json"
+  mkdir -p "$(dirname "$LEDGER")"
+  [[ -f "$LEDGER" ]] || echo '{}' > "$LEDGER"
+  local _now; _now=$(date -Iseconds)
+  local _pr_urls=()
+  for survivor in "${FILTER_SURVIVORS[@]}"; do
+    IFS=$'\t' read -r _o _r _n _head _url <<<"$survivor"
+    _pr_urls+=("$_url")
+    local _tmp; _tmp=$(mktemp)
+    jq --arg key "$_o/$_r#$_n" \
+       --arg commit "$_head" \
+       --arg now "$_now" \
+       --arg url "$_url" \
+       '.[$key] = {commit: $commit, held_at: $now, reason: "[in-flight] auto-claimed before review", pr_url: $url}' \
+       "$LEDGER" > "$_tmp" && mv "$_tmp" "$LEDGER"
+  done
+
+  echo "[$(date -Iseconds)] invoking claude with ${#_pr_urls[@]} PR(s): ${_pr_urls[*]}"
+  "$CLAUDE" -p "$SLASH ${_pr_urls[*]}"
   echo "[$(date -Iseconds)] poll done"
 }
 
@@ -431,17 +468,60 @@ cmd_findings() {
   cat "$file"
 }
 
+# Remove a PR's held-ledger entry so the next tick re-reviews it. Accepts a
+# full GitHub PR URL or a bare number (number must be unique across repos).
+cmd_clear_hold() {
+  local arg="${1:-}"
+  if [[ -z "$arg" ]]; then
+    echo "usage: pr-review-poller clear-hold <pr-url-or-number>" >&2; exit 2
+  fi
+  local LEDGER="$HOME/.local/state/pr-review-poller/held.json"
+  if [[ ! -f "$LEDGER" ]]; then
+    echo "no ledger at $LEDGER" >&2; exit 1
+  fi
+
+  local key=""
+  if [[ "$arg" =~ github\.com/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
+    key="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}#${BASH_REMATCH[3]}"
+  elif [[ "$arg" =~ ^[0-9]+$ ]]; then
+    local matches=()
+    while IFS= read -r m; do matches+=("$m"); done \
+      < <(jq -r --arg n "$arg" 'keys[] | select(endswith("#" + $n))' "$LEDGER")
+    if [[ ${#matches[@]} -eq 0 ]]; then
+      echo "no held entry for PR #$arg" >&2; exit 1
+    elif [[ ${#matches[@]} -gt 1 ]]; then
+      echo "multiple matches for PR #$arg — pass the full URL to disambiguate:" >&2
+      printf '  %s\n' "${matches[@]}" >&2
+      exit 1
+    fi
+    key="${matches[0]}"
+  else
+    echo "expected GitHub PR URL or bare number: $arg" >&2; exit 2
+  fi
+
+  local before
+  before=$(jq -r --arg key "$key" '.[$key] // empty' "$LEDGER")
+  if [[ -z "$before" ]]; then
+    echo "no held entry for $key" >&2; exit 1
+  fi
+
+  local tmp; tmp=$(mktemp)
+  jq --arg key "$key" 'del(.[$key])' "$LEDGER" > "$tmp" && mv "$tmp" "$LEDGER"
+  echo "cleared $key"
+}
+
 SUB="${1:-status}"
 [[ $# -gt 0 ]] && shift
 
 case "$SUB" in
-  status)   cmd_status   "$@" ;;
-  start)    cmd_start    "$@" ;;
-  stop)     cmd_stop     "$@" ;;
-  run)      cmd_run      "$@" ;;
-  logs)     cmd_logs     "$@" ;;
-  findings) cmd_findings "$@" ;;
-  config)   cmd_config   "$@" ;;
+  status)     cmd_status     "$@" ;;
+  start)      cmd_start      "$@" ;;
+  stop)       cmd_stop       "$@" ;;
+  run)        cmd_run        "$@" ;;
+  logs)       cmd_logs       "$@" ;;
+  findings)   cmd_findings   "$@" ;;
+  clear-hold) cmd_clear_hold "$@" ;;
+  config)     cmd_config     "$@" ;;
   help|-h|--help) cmd_help ;;
   *) echo "unknown subcommand: $SUB" >&2; cmd_help; exit 2 ;;
 esac
