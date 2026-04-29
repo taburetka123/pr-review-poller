@@ -9,6 +9,7 @@ LABEL="com.kezoo.pr-review-poller"
 LOCK_FILE="$HOME/.local/state/pr-review-poller.lock"
 STDOUT_LOG="$HOME/worktrees/.pr-review-poller-stdout.log"
 STDERR_LOG="$HOME/worktrees/.pr-review-poller-stderr.log"
+FINDINGS_DIR="$HOME/worktrees/.pr-review-findings"
 CLAUDE="/Users/kezoo/.local/bin/claude"
 
 load_config() {
@@ -57,13 +58,19 @@ Usage:
                                      no-post: POST decisions become HOLD;
                                      APPROVE still approves
   pr-review-poller logs [-n N]       Tail the stdout log (follow mode)
+  pr-review-poller findings          List recent PR-findings logs (mtime sort)
+  pr-review-poller findings <pr>     Print findings log for a PR. <pr> is a
+                                     full URL (https://github.com/o/r/pull/N)
+                                     or a bare number (must be unique across
+                                     repos)
   pr-review-poller config            Print current config
   pr-review-poller help              This help
 
-Config:  $CONFIG_FILE
-Plist:   $PLIST_DST
-Logs:    $STDOUT_LOG
-         $STDERR_LOG
+Config:    $CONFIG_FILE
+Plist:     $PLIST_DST
+Logs:      $STDOUT_LOG
+           $STDERR_LOG
+Findings:  $FINDINGS_DIR/<owner>/<repo>/<number>.log
 See: \$HOME/projects/personal/pr-review-poller/README.md
 EOF
 }
@@ -380,16 +387,61 @@ cmd_config() {
   fi
 }
 
+# Locate or list the per-PR findings logs written by kezoo-review-prs.
+# Layout: $FINDINGS_DIR/<owner>/<repo>/<number>.log
+cmd_findings() {
+  if [[ ! -d "$FINDINGS_DIR" ]]; then
+    echo "no findings yet at $FINDINGS_DIR" >&2
+    exit 1
+  fi
+
+  local arg="${1:-}"
+  if [[ -z "$arg" ]]; then
+    # mtime-sorted, most recent first; cap at 20 so it stays readable
+    find "$FINDINGS_DIR" -name '*.log' -type f -print0 \
+      | xargs -0 ls -t 2>/dev/null \
+      | head -20
+    return
+  fi
+
+  local file=""
+  if [[ "$arg" =~ github\.com/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
+    file="$FINDINGS_DIR/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/${BASH_REMATCH[3]}.log"
+  elif [[ "$arg" =~ ^[0-9]+$ ]]; then
+    # Bare number — find any matching file. Multiple matches across orgs/repos
+    # is ambiguous; fail with hints rather than guessing.
+    local matches=()
+    while IFS= read -r m; do matches+=("$m"); done < <(find "$FINDINGS_DIR" -name "$arg.log" -type f)
+    if [[ ${#matches[@]} -eq 0 ]]; then
+      echo "no findings log for PR #$arg" >&2; exit 1
+    elif [[ ${#matches[@]} -gt 1 ]]; then
+      echo "multiple matches for PR #$arg — pass the full URL to disambiguate:" >&2
+      printf '  %s\n' "${matches[@]}" >&2
+      exit 1
+    fi
+    file="${matches[0]}"
+  else
+    echo "expected a GitHub PR URL or bare number: $arg" >&2
+    exit 2
+  fi
+
+  if [[ ! -f "$file" ]]; then
+    echo "no findings log at $file" >&2; exit 1
+  fi
+  cat "$file"
+}
+
 SUB="${1:-status}"
 [[ $# -gt 0 ]] && shift
 
 case "$SUB" in
-  status) cmd_status "$@" ;;
-  start)  cmd_start  "$@" ;;
-  stop)   cmd_stop   "$@" ;;
-  run)    cmd_run    "$@" ;;
-  logs)   cmd_logs   "$@" ;;
-  config) cmd_config "$@" ;;
+  status)   cmd_status   "$@" ;;
+  start)    cmd_start    "$@" ;;
+  stop)     cmd_stop     "$@" ;;
+  run)      cmd_run      "$@" ;;
+  logs)     cmd_logs     "$@" ;;
+  findings) cmd_findings "$@" ;;
+  config)   cmd_config   "$@" ;;
   help|-h|--help) cmd_help ;;
   *) echo "unknown subcommand: $SUB" >&2; cmd_help; exit 2 ;;
 esac
