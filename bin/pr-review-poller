@@ -401,7 +401,17 @@ OSA
   done
 
   echo "[$(date -Iseconds)] invoking claude with ${#_pr_urls[@]} PR(s): ${_pr_urls[*]}"
-  "$CLAUDE" -p "$SLASH ${_pr_urls[*]}"
+  # Disable -e around claude so rate-limit / non-zero exit becomes a logged
+  # outcome instead of a silent script death (which would leave the next tick
+  # to infer "no 'poll done' line ⇒ probably rate-limited"). Survivors keep
+  # their [in-flight] ledger entries either way — that's what protects against
+  # retry — but the log should say so out loud.
+  local rc=0
+  "$CLAUDE" -p "$SLASH ${_pr_urls[*]}" || rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo "[$(date -Iseconds)] poll FAILED — claude exited rc=$rc; ${#_pr_urls[@]} PR(s) remain in-flight, no retry until new commits or 'pr-review-poller clear-hold'"
+    exit "$rc"
+  fi
   echo "[$(date -Iseconds)] poll done"
 }
 
