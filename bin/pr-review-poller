@@ -242,7 +242,11 @@ filter_prs() {
 
     # 4. Commit-age gate
     local committed_epoch age
-    committed_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$committed_at" +%s 2>/dev/null)
+    # TZ=UTC is required: BSD `date -j -f` ignores the literal `Z` in the format
+    # and parses the timestamp in $TZ, so without it the age is off by the
+    # local offset (7h in +07) and every commit looks artificially old — the
+    # gate never trips and too-young commits leak through to the auto-claim.
+    committed_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$committed_at" +%s 2>/dev/null)
     if [[ -z "$committed_epoch" ]]; then
       echo "  skip #$number ($owner/$repo): could not parse committedDate $committed_at"
       continue
