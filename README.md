@@ -27,9 +27,11 @@ Five layered checks prevent duplicate reviews, mid-push reviews, and beating hum
 ## Install
 
 ```
-./install.sh                                         # defaults: 10m interval, 10m commit-age gate
-./install.sh --interval 300 --min-commit-age 5m      # custom
+./install.sh                                         # defaults: hourly trigger, 2h frequency gate, 10m commit-age gate
+./install.sh --frequency 4h --min-commit-age 5m      # custom
 ```
+
+`launchd` fires the job hourly at minute 0 (`StartCalendarInterval`). If the Mac was asleep, one coalesced tick fires immediately on wake. A tick that arrives sooner than `--frequency` since the previous run is skipped in the shell before any work happens, so the effective cadence is "every N hours, plus one catch-up tick on wake from sleep".
 
 Re-run any time to change settings. `install.sh` renders the plist and config but does NOT start polling — use `pr-review-poller start` when you're ready.
 
@@ -42,7 +44,7 @@ Installed artifacts:
 ## Day-to-day
 
 ```
-pr-review-poller              # status — is it running? interval? last run? config?
+pr-review-poller              # status — is it running? schedule? last run? config?
 pr-review-poller start        # begin polling (launchctl load)
 pr-review-poller stop         # pause polling (launchctl unload)
 pr-review-poller run          # run one cycle right now (headless, respects lock)
@@ -56,6 +58,7 @@ Ad-hoc override:
 
 ```
 pr-review-poller run --min-commit-age 0   # disable age gate for this single run
+pr-review-poller run --force              # bypass the frequency gate for this single run
 pr-review-poller run --post               # allow posting. Default is no-post:
                                           # POST decisions become HOLD, APPROVE still approves
 ```

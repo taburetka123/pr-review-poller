@@ -7,6 +7,7 @@ CONFIG_FILE="${PR_REVIEW_POLLER_CONFIG:-$HOME/.config/pr-review-poller/config.en
 PLIST_DST="$HOME/Library/LaunchAgents/com.kezoo.pr-review-poller.plist"
 LABEL="com.kezoo.pr-review-poller"
 LOCK_FILE="$HOME/.local/state/pr-review-poller.lock"
+LAST_RUN_FILE="$HOME/.local/state/pr-review-poller/last-run.epoch"
 STDOUT_LOG="$HOME/worktrees/.pr-review-poller-stdout.log"
 STDERR_LOG="$HOME/worktrees/.pr-review-poller-stderr.log"
 FINDINGS_DIR="$HOME/worktrees/.pr-review-findings"
@@ -18,6 +19,7 @@ load_config() {
     source "$CONFIG_FILE"
   fi
   MIN_COMMIT_AGE="${MIN_COMMIT_AGE:-10m}"
+  REVIEW_FREQUENCY="${REVIEW_FREQUENCY:-2h}"
 }
 
 # Pretty-print whichever scheduling key the plist uses. StartCalendarInterval
@@ -46,7 +48,7 @@ pr-review-poller — unattended PR auto-review
 Usage:
   pr-review-poller [status]          Show timer state, config, last run
   pr-review-poller start             Load the launchd job (begin polling)
-  pr-review-poller start [--post] [--min-commit-age DUR]
+  pr-review-poller start [--post] [--min-commit-age DUR] [--frequency DUR]
                                      Start with flags baked into the plist's
                                      job args so every tick uses them
   pr-review-poller stop              Unload the launchd job (pause polling)
@@ -54,6 +56,10 @@ Usage:
                                      --head opens an iTerm2 tab (debug)
   pr-review-poller run --min-commit-age DUR
                                      Override the commit-age gate for this run
+  pr-review-poller run --frequency DUR
+                                     Override the run-frequency gate (min gap
+                                     between launchd ticks that do work)
+  pr-review-poller run --force       Bypass the frequency gate for this run
   pr-review-poller run --post        Allow posting for this run. Default is
                                      no-post: POST decisions become HOLD;
                                      APPROVE still approves
@@ -114,7 +120,18 @@ cmd_status() {
   fi
 
   echo "config:           $CONFIG_FILE"
-  echo "  MIN_COMMIT_AGE: $MIN_COMMIT_AGE"
+  echo "  MIN_COMMIT_AGE:   $MIN_COMMIT_AGE"
+  echo "  REVIEW_FREQUENCY: $REVIEW_FREQUENCY"
+
+  if [[ -f "$LAST_RUN_FILE" ]]; then
+    LAST_EPOCH=$(cat "$LAST_RUN_FILE" 2>/dev/null || echo 0)
+    NOW_EPOCH=$(date +%s)
+    ELAPSED=$(( NOW_EPOCH - LAST_EPOCH ))
+    LAST_HUMAN=$(date -r "$LAST_EPOCH" -Iseconds 2>/dev/null || echo "?")
+    echo "last run:         $LAST_HUMAN (${ELAPSED}s ago)"
+  else
+    echo "last run:         never (or last-run file missing)"
+  fi
 
   if [[ -f "$STDOUT_LOG" ]]; then
     LAST=$(grep -E '^\[.*\] (poll start|poll done|previous run)' "$STDOUT_LOG" 2>/dev/null | tail -1 || echo "")
@@ -138,11 +155,12 @@ cmd_start() {
   # Flags here rewrite the plist's ProgramArguments so every launchd tick runs
   # `pr-review-poller run <flags>`. Without flags, the existing plist is left
   # alone (so `start` after a prior `start --post` preserves posting mode).
-  local POST_FLAG=0 MIN_AGE_FLAG="" had_flag=0
+  local POST_FLAG=0 MIN_AGE_FLAG="" FREQ_FLAG="" had_flag=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --post) POST_FLAG=1; had_flag=1; shift ;;
       --min-commit-age) MIN_AGE_FLAG="$2"; had_flag=1; shift 2 ;;
+      --frequency) FREQ_FLAG="$2"; had_flag=1; shift 2 ;;
       *) echo "unknown flag: $1" >&2; exit 2 ;;
     esac
   done
@@ -150,6 +168,7 @@ cmd_start() {
   if [[ "$had_flag" == "1" ]]; then
     local args_json="[\"$HOME/.local/bin/pr-review-poller\",\"run\""
     [[ -n "$MIN_AGE_FLAG" ]] && args_json="$args_json,\"--min-commit-age\",\"$MIN_AGE_FLAG\""
+    [[ -n "$FREQ_FLAG" ]]    && args_json="$args_json,\"--frequency\",\"$FREQ_FLAG\""
     [[ "$POST_FLAG" == "1" ]] && args_json="$args_json,\"--post\""
     args_json="$args_json]"
     plutil -replace ProgramArguments -json "$args_json" "$PLIST_DST"
@@ -308,11 +327,14 @@ cmd_run() {
   load_config
   MODE="headless"
   POST=0
+  FORCE=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --head) MODE="head"; shift ;;
       --min-commit-age) MIN_COMMIT_AGE="$2"; shift 2 ;;
+      --frequency) REVIEW_FREQUENCY="$2"; shift 2 ;;
       --post) POST=1; shift ;;
+      --force) FORCE=1; shift ;;
       *) echo "unknown flag: $1" >&2; exit 2 ;;
     esac
   done
@@ -366,7 +388,30 @@ OSA
   fi
   export GH_TOKEN
 
-  echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE, post=$POST, cwd=$WORK_CWD, gh_user=$WORK_GH_USER)"
+  echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE, frequency=$REVIEW_FREQUENCY, post=$POST, cwd=$WORK_CWD, gh_user=$WORK_GH_USER)"
+
+  # Frequency gate: launchd fires hourly so a post-sleep wake catches up
+  # immediately, but we only do real work once per REVIEW_FREQUENCY window.
+  # Stamp on gate-pass (not on claude success) so a claude rate-limit doesn't
+  # cause hourly retries — the in-flight ledger already protects per-PR.
+  # --force (manual override) bypasses the gate.
+  if [[ "$FORCE" != "1" ]]; then
+    local freq_seconds; freq_seconds=$(duration_to_seconds "$REVIEW_FREQUENCY") || {
+      echo "[$(date -Iseconds)] invalid REVIEW_FREQUENCY=$REVIEW_FREQUENCY, skipping tick" >&2
+      exit 0
+    }
+    if [[ -f "$LAST_RUN_FILE" ]]; then
+      local last_epoch elapsed
+      last_epoch=$(cat "$LAST_RUN_FILE" 2>/dev/null || echo 0)
+      elapsed=$(( $(date +%s) - last_epoch ))
+      if [[ "$elapsed" -lt "$freq_seconds" ]]; then
+        echo "[$(date -Iseconds)] frequency gate: ${elapsed}s since last run, below ${freq_seconds}s threshold ($REVIEW_FREQUENCY) — skipping tick (use --force to override)"
+        exit 0
+      fi
+    fi
+  fi
+  mkdir -p "$(dirname "$LAST_RUN_FILE")"
+  date +%s > "$LAST_RUN_FILE"
 
   # Phase 1 in bash: only invoke Claude when ≥1 PR survives all filters.
   # filter_prs populates FILTER_SURVIVORS and prints skip reasons to stdout.
