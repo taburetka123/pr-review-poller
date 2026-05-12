@@ -8,6 +8,7 @@ PLIST_DST="$HOME/Library/LaunchAgents/com.kezoo.pr-review-poller.plist"
 LABEL="com.kezoo.pr-review-poller"
 LOCK_FILE="$HOME/.local/state/pr-review-poller.lock"
 LAST_RUN_FILE="$HOME/.local/state/pr-review-poller/last-run.epoch"
+LAST_PRUNE_FILE="$HOME/.local/state/pr-review-poller/last-prune.epoch"
 STDOUT_LOG="$HOME/worktrees/.pr-review-poller-stdout.log"
 STDERR_LOG="$HOME/worktrees/.pr-review-poller-stderr.log"
 FINDINGS_DIR="$HOME/worktrees/.pr-review-findings"
@@ -72,6 +73,9 @@ Usage:
   pr-review-poller clear-hold <pr>   Remove a PR's held-ledger entry so the
                                      next tick re-reviews it. <pr> is a URL
                                      or bare number
+  pr-review-poller prune             Delete findings logs for PRs that are no
+                                     longer OPEN (MERGED or CLOSED). Runs
+                                     automatically once/24h during 'run'
   pr-review-poller config            Print current config
   pr-review-poller help              This help
 
@@ -185,6 +189,69 @@ cmd_start() {
 cmd_stop() {
   launchctl unload "$PLIST_DST" 2>/dev/null || true
   echo "stopped"
+}
+
+# Walk $FINDINGS_DIR and delete log files whose PR is no longer OPEN (MERGED or
+# CLOSED). Gated to once/24h via $LAST_PRUNE_FILE unless force=1 is passed.
+# Caller must have GH_TOKEN exported (gh auth) and a usable cwd for gh.
+prune_findings() {
+  local force="${1:-0}"
+  local prune_seconds=86400
+  if [[ "$force" != "1" && -f "$LAST_PRUNE_FILE" ]]; then
+    local last elapsed
+    last=$(cat "$LAST_PRUNE_FILE" 2>/dev/null || echo 0)
+    elapsed=$(( $(date +%s) - last ))
+    if [[ "$elapsed" -lt "$prune_seconds" ]]; then
+      return 0
+    fi
+  fi
+  if [[ ! -d "$FINDINGS_DIR" ]]; then
+    return 0
+  fi
+
+  local deleted=0 kept=0 errors=0
+  while IFS= read -r f; do
+    local pr repo state
+    pr=$(basename "$f" .log)
+    repo=${f#"$FINDINGS_DIR/"}
+    repo=${repo%"/$pr.log"}
+    if state=$(gh pr view "$pr" -R "$repo" --json state -q .state 2>/dev/null); then
+      case "$state" in
+        MERGED|CLOSED)
+          echo "  prune: rm $repo#$pr ($state)"
+          rm -f "$f"
+          deleted=$((deleted+1))
+          ;;
+        *)
+          kept=$((kept+1))
+          ;;
+      esac
+    else
+      errors=$((errors+1))
+    fi
+  done < <(find "$FINDINGS_DIR" -name '*.log' -type f)
+
+  find "$FINDINGS_DIR" -mindepth 2 -type d -empty -delete 2>/dev/null || true
+
+  mkdir -p "$(dirname "$LAST_PRUNE_FILE")"
+  date +%s > "$LAST_PRUNE_FILE"
+  echo "[$(date -Iseconds)] prune: deleted=$deleted, kept=$kept, gh-errors=$errors"
+}
+
+cmd_prune() {
+  load_config
+  WORK_CWD="${PR_REVIEW_POLLER_WORK_CWD:-$HOME/projects/work/otto-service-requests-service}"
+  if ! cd "$WORK_CWD" 2>/dev/null; then
+    echo "work cwd missing ($WORK_CWD)" >&2
+    exit 1
+  fi
+  WORK_GH_USER="${PR_REVIEW_POLLER_GH_USER:-aleksandr-beliakov-rs}"
+  if ! GH_TOKEN=$(gh auth token --user "$WORK_GH_USER" -h github.com 2>&1); then
+    echo "could not get gh token for $WORK_GH_USER: $GH_TOKEN" >&2
+    exit 1
+  fi
+  export GH_TOKEN
+  prune_findings 1
 }
 
 duration_to_seconds() {
@@ -390,6 +457,10 @@ OSA
 
   echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE, frequency=$REVIEW_FREQUENCY, post=$POST, cwd=$WORK_CWD, gh_user=$WORK_GH_USER)"
 
+  # Daily housekeeping: drop findings logs for PRs that are no longer open.
+  # Independent of the review frequency gate; runs at most once/24h.
+  prune_findings || echo "[$(date -Iseconds)] prune failed (non-fatal)"
+
   # Frequency gate: launchd fires hourly so a post-sleep wake catches up
   # immediately, but we only do real work once per REVIEW_FREQUENCY window.
   # Stamp on gate-pass (not on claude success) so a claude rate-limit doesn't
@@ -585,6 +656,7 @@ case "$SUB" in
   logs)       cmd_logs       "$@" ;;
   findings)   cmd_findings   "$@" ;;
   clear-hold) cmd_clear_hold "$@" ;;
+  prune)      cmd_prune      "$@" ;;
   config)     cmd_config     "$@" ;;
   help|-h|--help) cmd_help ;;
   *) echo "unknown subcommand: $SUB" >&2; cmd_help; exit 2 ;;
