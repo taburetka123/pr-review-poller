@@ -22,6 +22,11 @@
     <dict>
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/Users/kezoo/.local/bin</string>
+        <!-- Claude Code's HTTP-MCP OAuth lookup needs $USER to locate the
+             cached token; without it plugin:slack:slack, github, datadog,
+             notion all fall back to "Needs authentication" under launchd. -->
+        <key>USER</key>
+        <string>kezoo</string>
     </dict>
 </dict>
 </plist>
