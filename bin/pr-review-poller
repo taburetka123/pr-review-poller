@@ -19,7 +19,7 @@ load_config() {
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"
   fi
-  MIN_COMMIT_AGE="${MIN_COMMIT_AGE:-10m}"
+  MIN_COMMIT_AGE="${MIN_COMMIT_AGE:-40m}"
   REVIEW_FREQUENCY="${REVIEW_FREQUENCY:-2h}"
 }
 
