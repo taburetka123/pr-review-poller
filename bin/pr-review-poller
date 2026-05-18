@@ -283,7 +283,7 @@ filter_prs() {
   local team=(aleksandr-beliakov-rs artem-saidanov-rs dmitry-indikeev-rs alexandra-vorobyeva-rs maksym-drobotov-rs)
 
   local raw
-  if ! raw=$(gh search prs --review-requested=@me --state=open --limit=50 \
+  if ! raw=$(gh search prs --review-requested=@me --state=open --draft=false --limit=50 \
       --json number,title,repository,author 2>&1); then
     echo "gh search failed: $raw" >&2
     return 1
