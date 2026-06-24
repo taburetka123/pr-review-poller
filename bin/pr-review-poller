@@ -280,7 +280,7 @@ filter_prs() {
 
   # Mirrors the team-members list in ~/.claude/skills/kezoo-review-prs/SKILL.md.
   # Keep in sync when the skill's team changes.
-  local team=(aleksandr-beliakov-rs artem-saidanov-rs dmitry-indikeev-rs alexandra-vorobyeva-rs maksym-drobotov-rs)
+  local team=(aleksandr-beliakov-rs dmitry-indikeev-rs alejandro-gomez-rs alexander-grigorov-rs vadim-kostenko-rs)
 
   local raw
   if ! raw=$(gh search prs --review-requested=@me --state=open --draft=false --limit=50 \
