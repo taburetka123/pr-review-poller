@@ -24,6 +24,10 @@ Five layered checks prevent duplicate reviews, mid-push reviews, and beating hum
 4. **Commit-age gate** — a PR is only reviewed once its newest commit is ≥ `MIN_COMMIT_AGE` old (default 10 min). Gives humans a lead window and avoids reviewing mid-push.
 5. **Held-ledger skip** — a PR currently marked HOLD at the current HEAD is skipped. When new commits land (HEAD moves), the entry goes stale and the PR is re-evaluated.
 
+- `INFLIGHT_TTL` (default `1h`): how long an `[in-flight]` placeholder may persist
+  before a new run treats it as orphaned (from a crashed/interrupted run) and
+  re-reviews the PR. Real holds (findings/complexity verdicts) are unaffected.
+
 ## Install
 
 ```

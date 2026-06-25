@@ -21,6 +21,7 @@ load_config() {
   fi
   MIN_COMMIT_AGE="${MIN_COMMIT_AGE:-40m}"
   REVIEW_FREQUENCY="${REVIEW_FREQUENCY:-2h}"
+  INFLIGHT_TTL="${INFLIGHT_TTL:-1h}"
 }
 
 # Pretty-print whichever scheduling key the plist uses. StartCalendarInterval
@@ -126,6 +127,7 @@ cmd_status() {
   echo "config:           $CONFIG_FILE"
   echo "  MIN_COMMIT_AGE:   $MIN_COMMIT_AGE"
   echo "  REVIEW_FREQUENCY: $REVIEW_FREQUENCY"
+  echo "  INFLIGHT_TTL:     $INFLIGHT_TTL"
 
   if [[ -f "$LAST_RUN_FILE" ]]; then
     LAST_EPOCH=$(cat "$LAST_RUN_FILE" 2>/dev/null || echo 0)
@@ -261,6 +263,66 @@ duration_to_seconds() {
     *h) echo $(( ${1%h} * 3600 )) ;;
     *)  return 1 ;;
   esac
+}
+
+# Parse an ISO8601 timestamp as written by `date -Iseconds` (e.g.
+# 2026-06-25T12:19:10+07:00, or a Z form) to epoch seconds. BSD `date -j -f`
+# with %z rejects the colon in a +HH:MM offset and the bare `Z`, so normalise
+# Z -> +0000 and strip the colon from a trailing +HH:MM / -HH:MM offset first.
+# The offset embedded in the timestamp is authoritative — do NOT force TZ here.
+# Returns non-zero (and prints nothing) on an unparseable timestamp.
+iso8601_to_epoch() {
+  local ts="$1"
+  [[ -z "$ts" ]] && return 1
+  ts="${ts/Z/+0000}"
+  if [[ "$ts" =~ ^(.+)([+-][0-9]{2}):([0-9]{2})$ ]]; then
+    ts="${BASH_REMATCH[1]}${BASH_REMATCH[2]}${BASH_REMATCH[3]}"
+  fi
+  date -j -f "%Y-%m-%dT%H:%M:%S%z" "$ts" +%s 2>/dev/null
+}
+
+# Remove abandoned "[in-flight]" placeholders from the held ledger. A placeholder
+# is abandoned when its held_at is older than $3 seconds (or missing/unparseable).
+# Real holds (any reason NOT starting with "[in-flight]") are never touched.
+# Called from cmd_run after the PID lock is held, so any surviving placeholder is
+# necessarily orphaned from a dead run (see the lock in cmd_run); the TTL is the
+# cooldown and a floor against the lock's check-then-write race. Pure: no gh/net.
+prune_inflight_holds() {
+  local ledger="$1" now_epoch="$2" ttl_seconds="$3"
+  [[ -f "$ledger" ]] || return 0
+
+  local expired_keys=() key held_at held_epoch age
+  while IFS=$'\t' read -r key held_at; do
+    [[ -z "$key" ]] && continue
+    if held_epoch=$(iso8601_to_epoch "$held_at"); then
+      age=$(( now_epoch - held_epoch ))
+      [[ "$age" -ge "$ttl_seconds" ]] && expired_keys+=("$key")
+    else
+      # Missing/unparseable held_at: a malformed placeholder must not be able to
+      # stick forever (that is the bug being fixed) — treat it as expired.
+      expired_keys+=("$key")
+    fi
+  done < <(jq -r '
+    to_entries[]
+    | select(.value.reason | type == "string" and startswith("[in-flight]"))
+    | [.key, (.value.held_at // "")]
+    | @tsv' "$ledger" 2>/dev/null)
+
+  [[ ${#expired_keys[@]} -eq 0 ]] && return 0
+
+  local keys_json tmp
+  keys_json=$(printf '%s\n' "${expired_keys[@]}" | jq -R . | jq -s 'map([.])')
+  tmp=$(mktemp)
+  if jq --argjson drop "$keys_json" 'delpaths($drop)' "$ledger" > "$tmp"; then
+    mv "$tmp" "$ledger"
+    for key in "${expired_keys[@]}"; do
+      echo "  prune in-flight: $key (placeholder older than ${ttl_seconds}s, orphaned from a dead run — eligible for re-review)"
+    done
+  else
+    rm -f "$tmp"
+    echo "  prune in-flight: jq delete failed, ledger left unchanged" >&2
+    return 1
+  fi
 }
 
 # Phase 1 discovery + filtering. Same logic as ~/.claude/skills/kezoo-review-prs/SKILL.md
@@ -484,6 +546,14 @@ OSA
   mkdir -p "$(dirname "$LAST_RUN_FILE")"
   date +%s > "$LAST_RUN_FILE"
 
+  # Expire abandoned "[in-flight]" placeholders before filtering. The PID lock is
+  # held here, so any surviving placeholder is orphaned from a dead run; filter
+  # has not run yet (FILTER_SURVIVORS empty, no in-flight written this tick), so
+  # this only ever prunes prior-run entries. Lets a crash-stranded PR re-surface.
+  local _inflight_ttl; _inflight_ttl=$(duration_to_seconds "$INFLIGHT_TTL") || _inflight_ttl=3600
+  prune_inflight_holds "$HOME/.local/state/pr-review-poller/held.json" "$(date +%s)" "$_inflight_ttl" \
+    || echo "[$(date -Iseconds)] in-flight prune failed (non-fatal)"
+
   # Phase 1 in bash: only invoke Claude when ≥1 PR survives all filters.
   # filter_prs populates FILTER_SURVIVORS and prints skip reasons to stdout.
   if ! filter_prs; then
@@ -645,19 +715,21 @@ cmd_clear_hold() {
   echo "cleared $key"
 }
 
-SUB="${1:-status}"
-[[ $# -gt 0 ]] && shift
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  SUB="${1:-status}"
+  [[ $# -gt 0 ]] && shift
 
-case "$SUB" in
-  status)     cmd_status     "$@" ;;
-  start)      cmd_start      "$@" ;;
-  stop)       cmd_stop       "$@" ;;
-  run)        cmd_run        "$@" ;;
-  logs)       cmd_logs       "$@" ;;
-  findings)   cmd_findings   "$@" ;;
-  clear-hold) cmd_clear_hold "$@" ;;
-  prune)      cmd_prune      "$@" ;;
-  config)     cmd_config     "$@" ;;
-  help|-h|--help) cmd_help ;;
-  *) echo "unknown subcommand: $SUB" >&2; cmd_help; exit 2 ;;
-esac
+  case "$SUB" in
+    status)     cmd_status     "$@" ;;
+    start)      cmd_start      "$@" ;;
+    stop)       cmd_stop       "$@" ;;
+    run)        cmd_run        "$@" ;;
+    logs)       cmd_logs       "$@" ;;
+    findings)   cmd_findings   "$@" ;;
+    clear-hold) cmd_clear_hold "$@" ;;
+    prune)      cmd_prune      "$@" ;;
+    config)     cmd_config     "$@" ;;
+    help|-h|--help) cmd_help ;;
+    *) echo "unknown subcommand: $SUB" >&2; cmd_help; exit 2 ;;
+  esac
+fi
