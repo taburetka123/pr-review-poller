@@ -279,6 +279,50 @@ iso8601_to_epoch() {
   date -j -f "%Y-%m-%dT%H:%M:%S%z" "$ts" +%s 2>/dev/null
 }
 
+# Remove abandoned "[in-flight]" placeholders from the held ledger. A placeholder
+# is abandoned when its held_at is older than $3 seconds (or missing/unparseable).
+# Real holds (any reason NOT starting with "[in-flight]") are never touched.
+# Called from cmd_run after the PID lock is held, so any surviving placeholder is
+# necessarily orphaned from a dead run (see the lock in cmd_run); the TTL is the
+# cooldown and a floor against the lock's check-then-write race. Pure: no gh/net.
+prune_inflight_holds() {
+  local ledger="$1" now_epoch="$2" ttl_seconds="$3"
+  [[ -f "$ledger" ]] || return 0
+
+  local expired_keys=() key held_at held_epoch age
+  while IFS=$'\t' read -r key held_at; do
+    [[ -z "$key" ]] && continue
+    if held_epoch=$(iso8601_to_epoch "$held_at"); then
+      age=$(( now_epoch - held_epoch ))
+      [[ "$age" -ge "$ttl_seconds" ]] && expired_keys+=("$key")
+    else
+      # Missing/unparseable held_at: a malformed placeholder must not be able to
+      # stick forever (that is the bug being fixed) — treat it as expired.
+      expired_keys+=("$key")
+    fi
+  done < <(jq -r '
+    to_entries[]
+    | select(.value.reason | type == "string" and startswith("[in-flight]"))
+    | [.key, (.value.held_at // "")]
+    | @tsv' "$ledger" 2>/dev/null)
+
+  [[ ${#expired_keys[@]} -eq 0 ]] && return 0
+
+  local keys_json tmp
+  keys_json=$(printf '%s\n' "${expired_keys[@]}" | jq -R . | jq -s 'map([.])')
+  tmp=$(mktemp)
+  if jq --argjson drop "$keys_json" 'delpaths($drop)' "$ledger" > "$tmp"; then
+    mv "$tmp" "$ledger"
+    for key in "${expired_keys[@]}"; do
+      echo "  prune in-flight: $key (placeholder older than ${ttl_seconds}s, orphaned from a dead run — eligible for re-review)"
+    done
+  else
+    rm -f "$tmp"
+    echo "  prune in-flight: jq delete failed, ledger left unchanged" >&2
+    return 1
+  fi
+}
+
 # Phase 1 discovery + filtering. Same logic as ~/.claude/skills/kezoo-review-prs/SKILL.md
 # Phase 1, pulled into bash so empty/all-skipped ticks don't burn Claude tokens.
 # Writes surviving PR URLs into the FILTER_SURVIVORS array (caller reads it).
