@@ -263,6 +263,22 @@ duration_to_seconds() {
   esac
 }
 
+# Parse an ISO8601 timestamp as written by `date -Iseconds` (e.g.
+# 2026-06-25T12:19:10+07:00, or a Z form) to epoch seconds. BSD `date -j -f`
+# with %z rejects the colon in a +HH:MM offset and the bare `Z`, so normalise
+# Z -> +0000 and strip the colon from a trailing +HH:MM / -HH:MM offset first.
+# The offset embedded in the timestamp is authoritative — do NOT force TZ here.
+# Returns non-zero (and prints nothing) on an unparseable timestamp.
+iso8601_to_epoch() {
+  local ts="$1"
+  [[ -z "$ts" ]] && return 1
+  ts="${ts/Z/+0000}"
+  if [[ "$ts" =~ ^(.+)([+-][0-9]{2}):([0-9]{2})$ ]]; then
+    ts="${BASH_REMATCH[1]}${BASH_REMATCH[2]}${BASH_REMATCH[3]}"
+  fi
+  date -j -f "%Y-%m-%dT%H:%M:%S%z" "$ts" +%s 2>/dev/null
+}
+
 # Phase 1 discovery + filtering. Same logic as ~/.claude/skills/kezoo-review-prs/SKILL.md
 # Phase 1, pulled into bash so empty/all-skipped ticks don't burn Claude tokens.
 # Writes surviving PR URLs into the FILTER_SURVIVORS array (caller reads it).
