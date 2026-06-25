@@ -645,19 +645,21 @@ cmd_clear_hold() {
   echo "cleared $key"
 }
 
-SUB="${1:-status}"
-[[ $# -gt 0 ]] && shift
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  SUB="${1:-status}"
+  [[ $# -gt 0 ]] && shift
 
-case "$SUB" in
-  status)     cmd_status     "$@" ;;
-  start)      cmd_start      "$@" ;;
-  stop)       cmd_stop       "$@" ;;
-  run)        cmd_run        "$@" ;;
-  logs)       cmd_logs       "$@" ;;
-  findings)   cmd_findings   "$@" ;;
-  clear-hold) cmd_clear_hold "$@" ;;
-  prune)      cmd_prune      "$@" ;;
-  config)     cmd_config     "$@" ;;
-  help|-h|--help) cmd_help ;;
-  *) echo "unknown subcommand: $SUB" >&2; cmd_help; exit 2 ;;
-esac
+  case "$SUB" in
+    status)     cmd_status     "$@" ;;
+    start)      cmd_start      "$@" ;;
+    stop)       cmd_stop       "$@" ;;
+    run)        cmd_run        "$@" ;;
+    logs)       cmd_logs       "$@" ;;
+    findings)   cmd_findings   "$@" ;;
+    clear-hold) cmd_clear_hold "$@" ;;
+    prune)      cmd_prune      "$@" ;;
+    config)     cmd_config     "$@" ;;
+    help|-h|--help) cmd_help ;;
+    *) echo "unknown subcommand: $SUB" >&2; cmd_help; exit 2 ;;
+  esac
+fi
