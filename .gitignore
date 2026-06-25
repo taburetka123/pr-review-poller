@@ -1,1 +1,4 @@
 # No local artifacts belong in the repo.
+
+# Claude planning artifacts (specs/plans) — kept locally, never in PRs.
+docs/superpowers/
