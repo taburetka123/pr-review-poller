@@ -551,7 +551,8 @@ OSA
   # has not run yet (FILTER_SURVIVORS empty, no in-flight written this tick), so
   # this only ever prunes prior-run entries. Lets a crash-stranded PR re-surface.
   local _inflight_ttl; _inflight_ttl=$(duration_to_seconds "$INFLIGHT_TTL") || _inflight_ttl=3600
-  prune_inflight_holds "$HOME/.local/state/pr-review-poller/held.json" "$(date +%s)" "$_inflight_ttl"
+  prune_inflight_holds "$HOME/.local/state/pr-review-poller/held.json" "$(date +%s)" "$_inflight_ttl" \
+    || echo "[$(date -Iseconds)] in-flight prune failed (non-fatal)"
 
   # Phase 1 in bash: only invoke Claude when ≥1 PR survives all filters.
   # filter_prs populates FILTER_SURVIVORS and prints skip reasons to stdout.
