@@ -21,6 +21,7 @@ load_config() {
   fi
   MIN_COMMIT_AGE="${MIN_COMMIT_AGE:-40m}"
   REVIEW_FREQUENCY="${REVIEW_FREQUENCY:-2h}"
+  INFLIGHT_TTL="${INFLIGHT_TTL:-1h}"
 }
 
 # Pretty-print whichever scheduling key the plist uses. StartCalendarInterval
@@ -126,6 +127,7 @@ cmd_status() {
   echo "config:           $CONFIG_FILE"
   echo "  MIN_COMMIT_AGE:   $MIN_COMMIT_AGE"
   echo "  REVIEW_FREQUENCY: $REVIEW_FREQUENCY"
+  echo "  INFLIGHT_TTL:     $INFLIGHT_TTL"
 
   if [[ -f "$LAST_RUN_FILE" ]]; then
     LAST_EPOCH=$(cat "$LAST_RUN_FILE" 2>/dev/null || echo 0)
@@ -543,6 +545,13 @@ OSA
   fi
   mkdir -p "$(dirname "$LAST_RUN_FILE")"
   date +%s > "$LAST_RUN_FILE"
+
+  # Expire abandoned "[in-flight]" placeholders before filtering. The PID lock is
+  # held here, so any surviving placeholder is orphaned from a dead run; filter
+  # has not run yet (FILTER_SURVIVORS empty, no in-flight written this tick), so
+  # this only ever prunes prior-run entries. Lets a crash-stranded PR re-surface.
+  local _inflight_ttl; _inflight_ttl=$(duration_to_seconds "$INFLIGHT_TTL") || _inflight_ttl=3600
+  prune_inflight_holds "$HOME/.local/state/pr-review-poller/held.json" "$(date +%s)" "$_inflight_ttl"
 
   # Phase 1 in bash: only invoke Claude when ≥1 PR survives all filters.
   # filter_prs populates FILTER_SURVIVORS and prints skip reasons to stdout.
