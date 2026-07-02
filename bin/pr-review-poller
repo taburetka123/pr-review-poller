@@ -479,7 +479,7 @@ tell application "iTerm"
     create tab with default profile
     delay 0.6
     tell current session of current tab
-      write text "$CLAUDE -p \"$SLASH\""
+      write text "$CLAUDE --model claude-opus-4-8 -p \"$SLASH\""
     end tell
   end tell
 end tell
@@ -592,9 +592,11 @@ OSA
 
   # Effort: medium is plenty for rule-driven triage (blocker = clearly broken;
   # major conf 5 = high-confidence broken). Higher effort just means longer
-  # wall-time per tick, raising the odds of sleeping mid-review. Model stays
-  # at the binary default (Opus) — at ~3 reviews/day, cost isn't the lever.
-  CLAUDE_FLAGS=(--effort medium)
+  # wall-time per tick, raising the odds of sleeping mid-review. Model is
+  # pinned explicitly: reviews post PUBLIC PR comments, and the user's global
+  # default is not guaranteed to be Opus anymore — unpinned, this would
+  # silently ride whatever the interactive default is.
+  CLAUDE_FLAGS=(--model claude-opus-4-8 --effort medium)
   echo "[$(date -Iseconds)] invoking claude (${CLAUDE_FLAGS[*]}) with ${#_pr_urls[@]} PR(s): ${_pr_urls[*]}"
   # Disable -e around claude so rate-limit / non-zero exit becomes a logged
   # outcome instead of a silent script death (which would leave the next tick
