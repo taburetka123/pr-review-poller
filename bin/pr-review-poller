@@ -59,7 +59,14 @@ Usage:
                                      job args so every tick uses them
   pr-review-poller stop              Unload the launchd job (pause polling)
   pr-review-poller run [--head]      Run one review cycle now
-                                     --head opens an iTerm2 tab (debug)
+                                     --head opens an iTerm2 tab running the
+                                     LEGACY in-session flow (claude launches
+                                     the reviewers itself): it does NOT
+                                     reproduce a production tick — no
+                                     poller-side reviewer launch, no in-flight
+                                     pre-write, no findings assertion — and
+                                     >10-min reviews still die at the harness
+                                     600s ceiling. Debug of the skill only
   pr-review-poller run --min-commit-age DUR
                                      Override the commit-age gate for this run
   pr-review-poller run --frequency DUR
@@ -517,6 +524,13 @@ assert_findings_fresh() {
     fi
     if [[ ! -f "$f" ]]; then
       echo "[$(date -Iseconds)] ERROR: findings log missing for $owner/$repo#$number (expected $f; reviewer: $ctx)"
+      missing=$((missing+1))
+      continue
+    fi
+    # A fresh inode is not a record: a zero-byte log means the writer died
+    # mid-append (or never wrote) — that must fail exactly like a missing log.
+    if [[ ! -s "$f" ]]; then
+      echo "[$(date -Iseconds)] ERROR: findings log empty for $owner/$repo#$number ($f is zero bytes; reviewer: $ctx)"
       missing=$((missing+1))
       continue
     fi

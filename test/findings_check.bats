@@ -21,6 +21,14 @@ setup() {
   [[ "$output" == *"ERROR: findings log stale"* ]]
 }
 
+@test "assert_findings_fresh: fresh but EMPTY log returns 1 (a zero-byte record is not a record)" {
+  mkdir -p "$FINDINGS_DIR/roofstock/otto-leases-service"
+  : > "$FINDINGS_DIR/roofstock/otto-leases-service/265.log"
+  run assert_findings_fresh "$(date +%s)" "$SURVIVOR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ERROR: findings log empty"* ]]
+}
+
 @test "assert_findings_fresh: fresh log returns 0, no ERROR" {
   local start; start=$(date +%s)
   mkdir -p "$FINDINGS_DIR/roofstock/otto-leases-service"

@@ -101,6 +101,12 @@ CL
   [ "$(cat "$RUN_ALL_INPUT")" = $'otto-leases-service\t265\tLRX-9992-branch\troofstock/otto-leases-service\t' ]
   # And the argv claude was ACTUALLY invoked with (not just the log echo):
   grep -q -- "--reviews-pre-run" "$BATS_TEST_TMPDIR/claude-argv"
+  # Model pin at the act level (Tier-2 finding 1): dropping the CLAUDE_FLAGS
+  # expansion from the real call must go red here even with the assignment
+  # intact. The stub records one argv element per line — join before matching
+  # so this asserts the adjacent "--model claude-opus-5" pair, not two tokens
+  # anywhere.
+  [[ "$(tr '\n' ' ' < "$BATS_TEST_TMPDIR/claude-argv")" == *"--model claude-opus-5 "* ]]
 }
 
 @test "PR no longer OPEN is skipped before any reviewer is launched" {

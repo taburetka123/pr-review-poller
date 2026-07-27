@@ -1,12 +1,18 @@
 # Tests the machine-local helper the kezoo-review-prs skill calls to write
 # findings logs. The helper lives in ~/.claude/scripts (operator-owned, next to
 # its pr-review-run siblings), outside this repo — override the location with
-# PR_REVIEW_FINDINGS_APPEND. Tests skip when it isn't installed.
+# PR_REVIEW_FINDINGS_APPEND. An absent helper FAILS the suite loudly (Tier-2
+# finding 5): the poller depends on it at runtime, so a machine without it is
+# broken, and a silent skip would read as green — the exact disease this repo
+# exists to cure.
 
 HELPER="${PR_REVIEW_FINDINGS_APPEND:-$HOME/.claude/scripts/pr-review-findings-append}"
 
 setup() {
-  [ -x "$HELPER" ] || skip "helper not installed at $HELPER"
+  if [ ! -x "$HELPER" ]; then
+    echo "FATAL: findings helper not installed/executable at $HELPER — the poller cannot record reviews without it" >&2
+    return 1
+  fi
   export PR_REVIEW_FINDINGS_ROOT="$BATS_TEST_TMPDIR/findings"
 }
 
