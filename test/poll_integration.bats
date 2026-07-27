@@ -68,8 +68,19 @@ write_claude_stub() {  # $1 = "writes" | "silent"
     cat > "$PR_REVIEW_POLLER_CLAUDE" <<'CL'
 #!/bin/bash
 { printf '%s\n' "$@"; echo '--CALL--'; } >> "${BATS_TEST_TMPDIR:?}/claude-argv"
+printf 'GH_CONFIG_DIR=%s\nPATH_HEAD=%s\nGH_RESOLVED=%s\n' "${GH_CONFIG_DIR:-unset}" "${PATH%%:*}" "$(command -v gh)" > "$BATS_TEST_TMPDIR/claude-env"
 mkdir -p "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service"
 printf '=== stub ===\nAction: HOLD\n' >> "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service/265.log"
+CL
+  elif [ "$1" = "attempts-write" ]; then
+    # Simulates a triage session that decides APPROVE and tries to submit it:
+    # the gh resolved via ITS OWN PATH must be the verify guard, which denies.
+    cat > "$PR_REVIEW_POLLER_CLAUDE" <<'CL'
+#!/bin/bash
+{ printf '%s\n' "$@"; echo '--CALL--'; } >> "${BATS_TEST_TMPDIR:?}/claude-argv"
+gh pr review 265 --approve --body "" || echo "write attempt denied rc=$?" >> "${BATS_TEST_TMPDIR:?}/claude-denials"
+mkdir -p "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service"
+printf '=== stub ===\nAction: APPROVE (blocked by verify guard)\n' >> "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service/265.log"
 CL
   else
     cat > "$PR_REVIEW_POLLER_CLAUDE" <<'CL'
@@ -156,4 +167,41 @@ CSV
   [[ "$output" == *"skip #265 (roofstock/otto-leases-service): state is MERGED, not OPEN"* ]]
   [[ "$output" == *"no PRs survived filters"* ]]
   [[ "$output" != *"launching"* ]]
+}
+
+@test "verify mode: guard env reaches the claude session (MCP-empty flags, guard PATH, empty gh config)" {
+  write_claude_stub writes
+  run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VERIFY MODE: GitHub writes structurally blocked"* ]]
+  [[ "$output" == *"poll done"* ]]
+  grep -q -- "--strict-mcp-config" "$BATS_TEST_TMPDIR/claude-argv"
+  assert_every_call_pinned
+  # the claude session inherited the guard PATH: gh resolved AT CLAUDE RUNTIME
+  # to the guard dir's gh (the head of its PATH), not the test's stub — the
+  # guard dir itself is gone by now (EXIT trap), so assert from the runtime
+  # capture, and pin the EMPTY gh config dir
+  local path_head gh_resolved
+  path_head=$(grep '^PATH_HEAD=' "$BATS_TEST_TMPDIR/claude-env" | cut -d= -f2-)
+  gh_resolved=$(grep '^GH_RESOLVED=' "$BATS_TEST_TMPDIR/claude-env" | cut -d= -f2-)
+  [ "$gh_resolved" = "$path_head/gh" ]
+  [ "$path_head" != "$BATS_TEST_TMPDIR/bin" ]
+  grep -q 'GH_CONFIG_DIR=.*/gh-config-empty$' "$BATS_TEST_TMPDIR/claude-env"
+}
+
+@test "verify mode: a write attempt from the claude session is denied, logged, and does not fail the tick" {
+  write_claude_stub attempts-write
+  run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 GitHub write attempt(s) BLOCKED this tick"* ]]
+  [[ "$output" == *"BLOCKED gh pr review 265 --approve"* ]]
+  [[ "$output" == *"poll done"* ]]
+  grep -q "write attempt denied rc=86" "$BATS_TEST_TMPDIR/claude-denials"
+}
+
+@test "verify mode refuses --post and --head" {
+  run "$SCRIPT_UNDER_TEST" run --verify --post
+  [ "$status" -eq 2 ]
+  run "$SCRIPT_UNDER_TEST" run --verify --head
+  [ "$status" -eq 2 ]
 }
