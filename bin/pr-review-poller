@@ -485,6 +485,39 @@ build_review_specs() {
   done
 }
 
+# Every dispatched PR must have produced a findings log THIS tick (the skill
+# appends one for every reviewed PR regardless of action, even zero findings).
+# Existence alone is not enough: on a re-review the file already exists from
+# the previous round — require mtime >= tick start. One ERROR line per miss;
+# returns the miss count so the caller can fail the tick loudly. A tick that
+# invoked claude and recorded nothing must never say "poll done" (the 2026-07
+# self-kill produced 189 such silent ticks).
+assert_findings_fresh() {
+  local start_epoch="$1"; shift
+  local survivor owner repo number rest missing=0 f mtime ctx
+  for survivor in "$@"; do
+    IFS=$'\t' read -r owner repo number rest <<<"$survivor"
+    f="$FINDINGS_DIR/$owner/$repo/$number.log"
+    # Distinguish "reviewer errored" from "triage wrote no findings log": quote
+    # the result file's Status: line when it exists (spec-review F1).
+    ctx="no result file"
+    if [[ -f "${PR_REVIEW_RESULT_DIR:-/tmp/pr-review}/$number.md" ]]; then
+      ctx=$(grep -m1 '^Status:' "${PR_REVIEW_RESULT_DIR:-/tmp/pr-review}/$number.md" 2>/dev/null || echo "no Status line")
+    fi
+    if [[ ! -f "$f" ]]; then
+      echo "[$(date -Iseconds)] ERROR: findings log missing for $owner/$repo#$number (expected $f; reviewer: $ctx)"
+      missing=$((missing+1))
+      continue
+    fi
+    mtime=$(stat -f %m "$f" 2>/dev/null || echo 0)
+    if [[ "$mtime" -lt "$start_epoch" ]]; then
+      echo "[$(date -Iseconds)] ERROR: findings log stale for $owner/$repo#$number ($f mtime $mtime < tick start $start_epoch; reviewer: $ctx)"
+      missing=$((missing+1))
+    fi
+  done
+  return "$missing"
+}
+
 cmd_run() {
   load_config
   MODE="headless"
@@ -633,24 +666,56 @@ OSA
        "$LEDGER" > "$_tmp" && mv "$_tmp" "$LEDGER"
   done
 
-  # Effort: medium is plenty for rule-driven triage (blocker = clearly broken;
-  # major conf 5 = high-confidence broken). Higher effort just means longer
-  # wall-time per tick, raising the odds of sleeping mid-review. Model is
-  # pinned explicitly: reviews post PUBLIC PR comments, and the user's global
-  # default is not guaranteed to be Opus anymore — unpinned, this would
-  # silently ride whatever the interactive default is.
-  CLAUDE_FLAGS=(--model claude-opus-4-8 --effort medium)
-  echo "[$(date -Iseconds)] invoking claude (${CLAUDE_FLAGS[*]}) with ${#_pr_urls[@]} PR(s): ${_pr_urls[*]}"
-  # Disable -e around claude so rate-limit / non-zero exit becomes a logged
-  # outcome instead of a silent script death (which would leave the next tick
-  # to infer "no 'poll done' line ⇒ probably rate-limited"). Survivors keep
-  # their [in-flight] ledger entries either way — that's what protects against
-  # retry — but the log should say so out loud.
+  # Run the reviewers HERE, in the poller's own bash, before any claude session
+  # exists. History: the skill used to launch pr-review-run-all from inside the
+  # headless claude session as a foreground Bash tool call; the harness force-
+  # moves any foreground call to background at its 600s tool ceiling, print mode
+  # then ends the session at end of turn, and the exit kills the reviewer
+  # process group (189 empty invocations, 2026-07). Reviews run 10-30m under
+  # pr-review-run's watchdog; only launchd bash can wait that long.
+  export PR_REVIEW_RESULT_DIR="${PR_REVIEW_RESULT_DIR:-/tmp/pr-review}"
+  mkdir -p "$PR_REVIEW_RESULT_DIR"
+  for survivor in "${FILTER_SURVIVORS[@]}"; do
+    IFS=$'\t' read -r _o _r _n _rest <<<"$survivor"
+    rm -f "$PR_REVIEW_RESULT_DIR/$_n.md"
+  done
+
+  local TICK_START; TICK_START=$(date +%s)
+  echo "[$(date -Iseconds)] launching ${#FILTER_SURVIVORS[@]} reviewer(s) via $RUN_ALL_SCRIPT"
+  if ! build_review_specs "${FILTER_SURVIVORS[@]}" | "$RUN_ALL_SCRIPT"; then
+    echo "[$(date -Iseconds)] poll FAILED — pr-review-run-all exited nonzero"
+    exit 1
+  fi
+
+  # Triage only: the reviewers already ran, so the claude session is short and
+  # never holds a long foreground call. Model pinned: reviews post PUBLIC PR
+  # comments; effort medium is plenty for rule-driven triage.
+  SLASH="$SLASH --reviews-pre-run"
+  CLAUDE_FLAGS=(--model claude-opus-5 --effort medium)
+  echo "[$(date -Iseconds)] invoking claude (${CLAUDE_FLAGS[*]}) for triage of ${#_pr_urls[@]} PR(s): ${_pr_urls[*]}"
   local rc=0
   "$CLAUDE" "${CLAUDE_FLAGS[@]}" -p "$SLASH ${_pr_urls[*]}" || rc=$?
+
+  # Assert BEFORE cleanup (it reads result files), clean up BEFORE any exit
+  # (spec-review F2: cleanup sequenced after exit 1 is dead code on exactly the
+  # failing ticks — today's worktree leak). In --reviews-pre-run mode the skill
+  # skips its own Cleanup section; the poller owns worktrees and result files.
+  local missing=0
+  assert_findings_fresh "$TICK_START" "${FILTER_SURVIVORS[@]}" || missing=$?
+
+  for survivor in "${FILTER_SURVIVORS[@]}"; do
+    IFS=$'\t' read -r _o _r _n _rest <<<"$survivor"
+    "$WORKTREE_SCRIPT" cleanup "$_r" "$_n" >/dev/null 2>&1 || true
+    rm -f "$PR_REVIEW_RESULT_DIR/$_n.md"
+  done
+
   if [[ $rc -ne 0 ]]; then
-    echo "[$(date -Iseconds)] poll FAILED — claude exited rc=$rc; ${#_pr_urls[@]} PR(s) remain in-flight, no retry until new commits or 'pr-review-poller clear-hold'"
+    echo "[$(date -Iseconds)] poll FAILED — claude triage exited rc=$rc; ${#_pr_urls[@]} PR(s) remain in-flight, no retry until new commits or 'pr-review-poller clear-hold'"
     exit "$rc"
+  fi
+  if [[ "$missing" -gt 0 ]]; then
+    echo "[$(date -Iseconds)] poll FAILED — $missing/${#FILTER_SURVIVORS[@]} findings log(s) missing or stale after triage; PR(s) remain in-flight (TTL re-queues in $INFLIGHT_TTL)"
+    exit 1
   fi
   echo "[$(date -Iseconds)] poll done"
 }
