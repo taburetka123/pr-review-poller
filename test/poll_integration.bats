@@ -20,11 +20,12 @@ setup() {
   # prune gate: stamp fresh so prune_findings skips (no gh calls from prune)
   date +%s > "$PR_REVIEW_POLLER_STATE_DIR/last-prune.epoch"
 
-  # Domain gate fixture: without it the fail-closed pod gate refuses every PR.
-  export PR_REVIEW_PODS_CSV="$BATS_TEST_TMPDIR/pods.csv"
-  cat > "$PR_REVIEW_PODS_CSV" <<'CSV'
-"GhStatus","Repository","x","x","x","x","x","x","x","x","x","x","x","Pod","tail"
-"FoundInGh","otto-leases-service","x","x","x","x","x","x","x","x","x","x","x","Otto - Leasing","t"
+  # Domain gate fixture: without it the fail-closed ownership gate refuses
+  # every PR. Member column holds gh logins, matching the real map's shape.
+  export PR_REVIEW_OWNED_CSV="$BATS_TEST_TMPDIR/code-owners.csv"
+  cat > "$PR_REVIEW_OWNED_CSV" <<'CSV'
+"Team","Pod","Member"
+"otto-leases-service-co","Property Services (RTM)","aleksandr-beliakov-rs"
 CSV
 
   # gh stub: auth token / search prs / pr view
@@ -165,16 +166,30 @@ assert_every_call_pinned() {
   assert_every_call_pinned
 }
 
-@test "repo owned by a foreign pod is skipped by the domain gate, reviewer never launched" {
+@test "repo the login does not code-own is skipped by the domain gate, reviewer never launched" {
   write_claude_stub writes
-  cat > "$PR_REVIEW_PODS_CSV" <<'CSV'
-"GhStatus","Repository","x","x","x","x","x","x","x","x","x","x","x","Pod","tail"
-"FoundInGh","otto-leases-service","x","x","x","x","x","x","x","x","x","x","x","Otto - Core","t"
+  cat > "$PR_REVIEW_OWNED_CSV" <<'CSV'
+"Team","Pod","Member"
+"otto-other-service-co","Property Services (RTM)","aleksandr-beliakov-rs"
 CSV
   run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
   [ "$status" -eq 0 ]
-  [[ "$output" == *"domain gate — pod 'Otto - Core' outside allowed domain"* ]]
+  [[ "$output" == *"domain gate — not a code owner of it"* ]]
   [[ "$output" == *"no PRs survived filters"* ]]
+  [[ "$output" != *"launching"* ]]
+}
+
+@test "zero code-owner rows mutes the tick LOUDLY, never silently" {
+  write_claude_stub writes
+  cat > "$PR_REVIEW_OWNED_CSV" <<'CSV'
+"Team","Pod","Member"
+"otto-leases-service-co","Property Services (RTM)","somebody-else-rs"
+CSV
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ERROR: domain gate unavailable"* ]]
+  [[ "$output" == *"ZERO code-owner teams matched"* ]]
+  [[ "$output" == *"domain gate unavailable (see the ERROR above) — fail closed"* ]]
   [[ "$output" != *"launching"* ]]
 }
 
