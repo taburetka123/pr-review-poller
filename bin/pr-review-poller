@@ -593,15 +593,25 @@ derive_owned_repos() {
 # caller's skip line. Distinct from the clone check, which is CAPABILITY (can
 # this machine review it) rather than domain (should it).
 repo_owned() {
-  local repo="$1" extra
+  local repo="$1" extra owned
+  # Derivation FIRST, so a repo that passes on its own merit is reported as
+  # such even when it is also listed in the override — otherwise a stale
+  # override entry would masquerade as an ownership admit (and vice versa: an
+  # override-only admit must be visible, because it is the thing that keeps
+  # being reviewed after a -co membership goes away).
+  while IFS= read -r owned; do
+    if [[ -n "$owned" && "$owned" == "$repo" ]]; then
+      echo "code owner (${repo}-co)"
+      return 0
+    fi
+  done <<<"$OWNED_REPOS"
   IFS='|' read -r -a _extras <<<"${ALLOWED_EXTRA_REPOS:-}"
   for extra in "${_extras[@]:-}"; do
-    [[ -n "$extra" && "$extra" == "$repo" ]] && return 0
+    if [[ -n "$extra" && "$extra" == "$repo" ]]; then
+      echo "ALLOWED_EXTRA_REPOS override (not derived from code ownership)"
+      return 0
+    fi
   done
-  local owned
-  while IFS= read -r owned; do
-    [[ -n "$owned" && "$owned" == "$repo" ]] && return 0
-  done <<<"$OWNED_REPOS"
   echo "not a code owner of it ($WORK_GH_USER is not in ${repo}-co) — add the membership upstream, or ALLOWED_EXTRA_REPOS if it should be reviewed anyway"
   return 1
 }
@@ -614,7 +624,7 @@ FILTER_SURVIVORS=()
 OWNED_GATE_FAILED=0
 filter_prs() {
   FILTER_SURVIVORS=()
-  local me="aleksandr-beliakov-rs"
+  local me="$WORK_GH_USER"
   local ledger="$LEDGER_FILE"
   local now_epoch; now_epoch=$(date +%s)
   local min_seconds; min_seconds=$(duration_to_seconds "$MIN_COMMIT_AGE") || {
@@ -665,7 +675,9 @@ filter_prs() {
       continue
     fi
     local owned_reason
-    if ! owned_reason=$(repo_owned "$repo"); then
+    if owned_reason=$(repo_owned "$repo"); then
+      echo "  admit #$number ($owner/$repo): domain gate — $owned_reason"
+    else
       echo "  skip #$number ($owner/$repo): domain gate — $owned_reason"
       continue
     fi
@@ -996,6 +1008,16 @@ OSA
   if ! filter_prs; then
     echo "[$(date -Iseconds)] filter failed, skipping tick"
     exit 0
+  fi
+
+  # A muted domain gate must NOT terminate like a healthy empty queue: it
+  # skipped 100% of the queue for an infrastructure reason, and `cmd_status`
+  # reads exactly these terminal lines. Same contract as the findings
+  # assertion — a tick that reviewed nothing because something broke never
+  # says "poll done" (the 189-silent-ticks shape, different cause).
+  if [[ "$OWNED_GATE_FAILED" == "1" ]]; then
+    echo "[$(date -Iseconds)] poll FAILED — domain gate unavailable, every PR skipped this tick (see the ERROR above); nothing was reviewed"
+    exit 1
   fi
 
   if [[ ${#FILTER_SURVIVORS[@]} -eq 0 ]]; then

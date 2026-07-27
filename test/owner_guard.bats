@@ -121,3 +121,33 @@ CSV
   # the same prose-blinds-the-guard trap, inverted.
   [ "$(grep -vE '^[[:space:]]*#' "$SCRIPT_UNDER_TEST" | grep -cE '\$\(derive_owned_repos\)')" -eq 0 ]
 }
+
+@test "an admitted repo reports WHICH mechanism admitted it" {
+  # Tier-2 #2: an override admit was indistinguishable from a derived one, so
+  # a stale ALLOWED_EXTRA_REPOS entry could keep a repo reviewed after its -co
+  # membership was removed, with nothing in the log to show it.
+  derive_owned_repos
+  run repo_owned otto-leases-service
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"code owner"* ]]
+  [[ "$output" != *"override"* ]]
+  run repo_owned services-contracts
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ALLOWED_EXTRA_REPOS override"* ]]
+}
+
+@test "an override entry that is ALSO derived reports the derivation, not the override" {
+  # The live config lists all 19 derived repos in the override; a repo that
+  # would pass on its own merit must not be reported as override-admitted.
+  ALLOWED_EXTRA_REPOS="services-contracts|otto-leases-service"
+  derive_owned_repos
+  run repo_owned otto-leases-service
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"code owner"* ]]
+}
+
+@test "the last-review dedup uses the resolved login, not a hardcoded name" {
+  # PR #5 advertises "no hardcoded identity"; filter_prs kept a literal.
+  [ "$(grep -vE '^[[:space:]]*#' "$SCRIPT_UNDER_TEST" | grep -cE 'local me="aleksandr-beliakov-rs"')" -eq 0 ]
+  grep -qE '^[[:space:]]*local me="\$WORK_GH_USER"' "$SCRIPT_UNDER_TEST"
+}

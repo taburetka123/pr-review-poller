@@ -186,11 +186,47 @@ CSV
 "otto-leases-service-co","Property Services (RTM)","somebody-else-rs"
 CSV
   run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
-  [ "$status" -eq 0 ]
+  # A gate-failure tick must NOT look like a healthy empty queue (Tier-2 #1):
+  # nonzero exit, its own terminal line, and never "poll done".
+  [ "$status" -eq 1 ]
   [[ "$output" == *"ERROR: domain gate unavailable"* ]]
   [[ "$output" == *"ZERO code-owner teams matched"* ]]
   [[ "$output" == *"domain gate unavailable (see the ERROR above) — fail closed"* ]]
+  [[ "$output" == *"poll FAILED — domain gate unavailable"* ]]
+  [[ "$output" != *"poll done"* ]]
+  [[ "$output" != *"no PRs survived filters"* ]]
   [[ "$output" != *"launching"* ]]
+}
+
+@test "a healthy empty queue still exits 0 with poll done (the gate-failure branch must not overreach)" {
+  write_claude_stub writes
+  cat > "$PR_REVIEW_OWNED_CSV" <<'CSV'
+"Team","Pod","Member"
+"otto-other-service-co","Property Services (RTM)","aleksandr-beliakov-rs"
+CSV
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no PRs survived filters"* ]]
+  [[ "$output" == *"poll done"* ]]
+  [[ "$output" != *"poll FAILED"* ]]
+}
+
+@test "an override-admitted repo says so in the log" {
+  write_claude_stub writes
+  cat > "$PR_REVIEW_OWNED_CSV" <<'CSV'
+"Team","Pod","Member"
+"otto-other-service-co","Property Services (RTM)","aleksandr-beliakov-rs"
+CSV
+  ALLOWED_EXTRA_REPOS="otto-leases-service" run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"admit #265 (roofstock/otto-leases-service): domain gate — ALLOWED_EXTRA_REPOS override"* ]]
+}
+
+@test "a derived repo is admitted as code owner, not as an override" {
+  write_claude_stub writes
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"admit #265 (roofstock/otto-leases-service): domain gate — code owner (otto-leases-service-co)"* ]]
 }
 
 @test "PR no longer OPEN is skipped before any reviewer is launched" {
