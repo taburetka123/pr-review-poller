@@ -34,10 +34,14 @@ GH
   chmod +x "$BATS_TEST_TMPDIR/bin/gh"
   export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
 
+  # The stub tees its stdin OUTSIDE PR_REVIEW_RESULT_DIR (cleanup_dispatched
+  # would eat anything inside it) so tests can assert the exact spec content
+  # that reached run-all — guarding the tuple field-shift class at the seam.
+  export RUN_ALL_INPUT="$BATS_TEST_TMPDIR/run-all-input.tsv"
   cat > "$PR_REVIEW_RUN_ALL" <<'RA'
 #!/bin/bash
 mkdir -p "${PR_REVIEW_RESULT_DIR:?}"
-while IFS=$'\t' read -r repo pr branch slug since; do
+tee "${RUN_ALL_INPUT:?}" | while IFS=$'\t' read -r repo pr branch slug since; do
   [ -z "$pr" ] && continue
   printf 'Status: ok\nComplexity: 2\n## Findings\nNo findings.\n' > "$PR_REVIEW_RESULT_DIR/$pr.md"
 done
@@ -49,14 +53,17 @@ RA
 }
 
 write_claude_stub() {  # $1 = "writes" | "silent"
+  # Both stubs record their argv so tests can assert on what claude was
+  # actually invoked with, not just on cmd_run's log echo of it.
   if [ "$1" = "writes" ]; then
     cat > "$PR_REVIEW_POLLER_CLAUDE" <<'CL'
 #!/bin/bash
+printf '%s\n' "$@" > "${BATS_TEST_TMPDIR:?}/claude-argv"
 mkdir -p "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service"
 printf '=== stub ===\nAction: HOLD\n' >> "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service/265.log"
 CL
   else
-    printf '#!/bin/bash\nexit 0\n' > "$PR_REVIEW_POLLER_CLAUDE"
+    printf '#!/bin/bash\nprintf "%%s\\n" "$@" > "${BATS_TEST_TMPDIR:?}/claude-argv"\nexit 0\n' > "$PR_REVIEW_POLLER_CLAUDE"
   fi
   chmod +x "$PR_REVIEW_POLLER_CLAUDE"
 }
@@ -90,6 +97,10 @@ CL
   [[ "$output" == *"pr-review-run-all: completed"* ]]
   [[ "$output" == *"launching 1 reviewer(s)"* ]]
   [[ "$output" == *"--reviews-pre-run"* ]]
+  # The exact spec line that reached run-all (field-shift guard at the seam):
+  [ "$(cat "$RUN_ALL_INPUT")" = $'otto-leases-service\t265\tLRX-9992-branch\troofstock/otto-leases-service\t' ]
+  # And the argv claude was ACTUALLY invoked with (not just the log echo):
+  grep -q -- "--reviews-pre-run" "$BATS_TEST_TMPDIR/claude-argv"
 }
 
 @test "PR no longer OPEN is skipped before any reviewer is launched" {
