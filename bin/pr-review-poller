@@ -26,11 +26,17 @@ load_config() {
   MIN_COMMIT_AGE="${MIN_COMMIT_AGE:-40m}"
   REVIEW_FREQUENCY="${REVIEW_FREQUENCY:-2h}"
   INFLIGHT_TTL="${INFLIGHT_TTL:-1h}"
-  # Domain policy (pod-scope gate). Policy lives HERE (config.env-overridable),
-  # mechanism in pod_allowed(). Pods per engineering-pods' repositories-config
-  # CSV; |-separated exact names. Extra repos = explicit escape hatch for
-  # legitimately pod-less repos (services-contracts has an empty Pod column).
-  ALLOWED_PODS="${ALLOWED_PODS:-Otto - Leasing|Otto - Resident Experience|Otto - Shared}"
+  # Domain policy (pod-scope gate). Policy lives HERE — config.env overrides
+  # either knob with a one-line edit; mechanism lives in pod_allowed().
+  # ALLOWED_PODS: exact Pod-column names from engineering-pods'
+  # repositories-config.csv, |-separated. The default set is every pod the
+  # poller has actually met MINUS "Otto - Core" (the 2026-07-27 incident's
+  # pod). "Otto - Property Services" is in it because that is
+  # otto-service-requests-service — the poller's own default WORK_CWD and its
+  # busiest repo; a pure LRX-only set would have silently stopped reviewing it.
+  # ALLOWED_EXTRA_REPOS: repo-level allowlist for repos ABSENT from the CSV
+  # (services-contracts has no row at all), which otherwise fail closed forever.
+  ALLOWED_PODS="${ALLOWED_PODS:-Otto - Leasing|Otto - Resident Experience|Otto - Property Services|Otto - Shared}"
   ALLOWED_EXTRA_REPOS="${ALLOWED_EXTRA_REPOS:-services-contracts}"
 }
 
@@ -83,17 +89,22 @@ Usage:
                                      complete, honest tick — discovery,
                                      filters, real reviewers, triage, findings
                                      log, freshness assertion, exit codes —
-                                     with GitHub writes STRUCTURALLY blocked:
-                                     no MCP servers in the claude sessions, a
-                                     default-deny gh guard (reads only) with
-                                     an empty gh config for anything that
-                                     bypasses it, push-blocked git/ssh.
-                                     Blocked attempts are logged loudly. This
-                                     is the ONLY mode E2E / verification runs
-                                     use; a posting run is a human decision,
-                                     never a verification default. Note: the
-                                     findings log records the INTENDED action
-                                     (e.g. APPROVE) — nothing lands on GitHub;
+                                     with NO GitHub write on any gh / git /
+                                     MCP path: no MCP servers in the claude
+                                     sessions, a default-deny gh guard that
+                                     also denies the whole 'gh auth' branch
+                                     (no credential handout), push-blocked
+                                     git/ssh. Blocked attempts are logged
+                                     loudly. NOT airtight — raw HTTP clients
+                                     (curl/python3/node/perl) cannot be
+                                     allowlisted away, and the account-routing
+                                     gh wrapper called by absolute path reads
+                                     the macOS keyring. This is still the ONLY
+                                     mode E2E / verification runs use; a
+                                     posting run is a human decision, never a
+                                     verification default. The findings log
+                                     records the INTENDED action (e.g.
+                                     APPROVE) — nothing lands on GitHub;
                                      ledger entries persist as usual
                                      (clear-hold to reset)
   pr-review-poller run --post        Allow posting for this run. Default is
@@ -360,24 +371,32 @@ prune_inflight_holds() {
   fi
 }
 
-# --verify support: build a guard toolchain that makes GitHub writes
-# STRUCTURALLY impossible for the whole tick subtree, not merely discouraged.
-# Three layers, each enforced outside the model:
+# --verify support: a guard toolchain that blocks GitHub writes on every
+# gh / git / MCP path for the tick subtree. It is NOT airtight, and the
+# accurate claim matters more than a strong-sounding one (an earlier revision
+# said "structurally impossible"; a reviewer punctured it in twenty minutes):
 #   1. MCP: the triage and reviewer claude sessions run with
 #      --strict-mcp-config --mcp-config '{"mcpServers":{}}' — no MCP server is
 #      loaded at all, so mcp__github__* / slack write tools do not exist
 #      (harness-enforced, not a model instruction).
-#   2. gh: a PATH-priority guard with a default-deny allowlist (read-only
-#      shapes only) fronts every gh call and logs denials. The subtree's
-#      GH_CONFIG_DIR points at an EMPTY config and GH_TOKEN is never exported,
-#      so even a bypass via an absolute-path gh binary runs UNAUTHENTICATED —
-#      the guard restores the real config only for calls it allowed.
+#   2. gh: a PATH-priority default-deny guard (read-only shapes only) fronts
+#      every gh call and logs denials. The ENTIRE `gh auth` branch is denied:
+#      a handed-out token defeats everything downstream, so the credential is
+#      the real control point. GH_TOKEN is never exported in this mode.
 #   3. git: a PATH guard denies push/send-pack, and GIT_SSH_COMMAND routes
 #      through a wrapper that refuses any remote git-receive-pack — so a push
 #      is blocked even via an absolute-path git.
-# Residual, stated honestly: a session that mined raw credentials out of the
-# macOS keychain itself could still write; no process-level guard closes that.
-# Every path available to a well-behaved-or-confused model is closed.
+# NAMED RESIDUALS (do not paper over these):
+#   (a) Raw HTTP clients — curl, python3, node, perl — cannot be allowlisted
+#       away; chasing them is whack-a-mole. Any credential obtained by other
+#       means still reaches api.github.com. Denying `gh auth` removes the
+#       easy handout, not the possibility.
+#   (b) The account-routing gh wrapper (~/projects/personal/bin-scripts/gh,
+#       which is what `gh` resolves to here) invoked by ABSOLUTE path skips
+#       this PATH guard, and its lookup reads the macOS KEYRING — which
+#       GH_CONFIG_DIR does not gate. The empty GH_CONFIG_DIR below still
+#       de-authenticates the plain homebrew binary, so it is kept as
+#       defence-in-depth, but it is NOT a deauthentication guarantee.
 VERIFY_GUARD_DIR=""
 VERIFY_GUARD_LOG=""
 setup_verify_guard() {
@@ -404,8 +423,12 @@ deny() {
   exit 86
 }
 case "${1:-}" in
-  auth)
-    case "${2:-}" in token|status) ;; *) deny "$@" ;; esac ;;
+  # The ENTIRE auth branch is denied — a handed-out token is the whole ball
+  # game: curl/python3/node/perl all speak HTTP and none can be allowlisted
+  # away, so the credential itself is the only control point that works.
+  # (`auth status --show-token` printed it too; inspecting $2 alone was not
+  # enough.) The poller's own liveness check runs BEFORE this guard is on PATH.
+  auth) deny "$@" ;;
   search) ;;
   pr)
     case "${2:-}" in view|diff|checks|list) ;; *) deny "$@" ;; esac ;;
@@ -522,11 +545,15 @@ pod_allowed() {
   fi
   local pod
   if ! pod=$(awk -F'","' -v r="$repo" '$2 == r {p=$14; sub(/"$/,"",p); print p; found=1; exit} END {exit found?0:1}' "$PODS_CSV_FILE"); then
-    echo "pod unresolved (no row in pods map)"
+    # DISTINCT from a foreign-pod refusal: absence means the map (or
+    # ALLOWED_EXTRA_REPOS) needs a human, not that the repo is out of scope.
+    # Loud on purpose — a silently fail-closed repo goes quiet forever and
+    # nobody learns why (services-contracts is exactly this shape).
+    echo "repo ABSENT from the pods map — fail closed; add it to the map or to ALLOWED_EXTRA_REPOS if it should be reviewed"
     return 1
   fi
   if [[ -z "$pod" ]]; then
-    echo "pod empty in pods map (add to ALLOWED_EXTRA_REPOS if legitimate)"
+    echo "pod cell empty in the pods map — fail closed; add to ALLOWED_EXTRA_REPOS if legitimate"
     return 1
   fi
   local allowed
@@ -836,25 +863,16 @@ OSA
     exit 0
   fi
 
-  if [[ "$VERIFY" == "1" ]]; then
-    setup_verify_guard
-    export PATH="$VERIFY_GUARD_DIR:$PATH"
-    export GH_CONFIG_DIR="$VERIFY_GUARD_DIR/gh-config-empty"
-    export GIT_SSH_COMMAND="$VERIFY_GUARD_DIR/verify-ssh"
-    export PR_REVIEW_NO_MCP=1
-    echo "[$(date -Iseconds)] VERIFY MODE: GitHub writes structurally blocked for this tick (gh default-deny guard + empty gh config for any bypass + no MCP servers in claude sessions + push-blocked git/ssh); guard log: $VERIFY_GUARD_LOG"
-  fi
-
   # gh's active account is global, not cwd-scoped — under launchd it resolves to
   # the personal account, so `--review-requested=@me` returns nothing. Pull the
   # work-account token from the keyring and export it for this run only.
-  # In VERIFY mode the token is validated but NEVER exported: an exported
-  # GH_TOKEN would re-authenticate any absolute-path gh that bypassed the
-  # guard. The guard restores the real gh config itself, per allowed call.
+  # VERIFY: validate liveness HERE, BEFORE the guard goes on PATH (the guard
+  # denies the whole `gh auth` branch), and never export GH_TOKEN — an exported
+  # token would hand the credential straight to the session's environment.
   WORK_GH_USER="${PR_REVIEW_POLLER_GH_USER:-aleksandr-beliakov-rs}"
   if [[ "$VERIFY" == "1" ]]; then
     if ! gh auth token --user "$WORK_GH_USER" -h github.com >/dev/null 2>&1; then
-      echo "[$(date -Iseconds)] could not validate gh token for $WORK_GH_USER (via verify guard)"
+      echo "[$(date -Iseconds)] could not validate gh token for $WORK_GH_USER"
       exit 0
     fi
   else
@@ -863,6 +881,15 @@ OSA
       exit 0
     fi
     export GH_TOKEN
+  fi
+
+  if [[ "$VERIFY" == "1" ]]; then
+    setup_verify_guard
+    export PATH="$VERIFY_GUARD_DIR:$PATH"
+    export GH_CONFIG_DIR="$VERIFY_GUARD_DIR/gh-config-empty"
+    export GIT_SSH_COMMAND="$VERIFY_GUARD_DIR/verify-ssh"
+    export PR_REVIEW_NO_MCP=1
+    echo "[$(date -Iseconds)] VERIFY MODE: no GitHub write on any gh / git / MCP path this tick (gh guard denies writes AND the whole auth branch — no credential handout; no MCP servers in claude sessions; push-blocked git/ssh). NOT airtight — named residuals: (1) raw HTTP clients (curl/python3/node/perl) cannot be allowlisted away, so a credential obtained by other means still reaches api.github.com; (2) the account-routing gh wrapper invoked by ABSOLUTE path bypasses this guard and reads the macOS keyring, which no env var gates. Guard log: $VERIFY_GUARD_LOG"
   fi
 
   echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE, frequency=$REVIEW_FREQUENCY, post=$POST, verify=$VERIFY, cwd=$WORK_CWD, gh_user=$WORK_GH_USER)"

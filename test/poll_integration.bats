@@ -173,7 +173,12 @@ CSV
   write_claude_stub writes
   run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
   [ "$status" -eq 0 ]
-  [[ "$output" == *"VERIFY MODE: GitHub writes structurally blocked"* ]]
+  # Banner states the accurate claim (no gh/git/MCP write path) AND names the
+  # residuals — an overclaim here is the failure this wording replaced.
+  [[ "$output" == *"VERIFY MODE: no GitHub write on any gh / git / MCP path"* ]]
+  [[ "$output" == *"NOT airtight"* ]]
+  [[ "$output" == *"raw HTTP clients"* ]]
+  [[ "$output" == *"keyring"* ]]
   [[ "$output" == *"poll done"* ]]
   grep -q -- "--strict-mcp-config" "$BATS_TEST_TMPDIR/claude-argv"
   assert_every_call_pinned

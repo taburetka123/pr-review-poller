@@ -37,18 +37,28 @@ teardown() {
   grep -q "REAL-GH CFG: $BATS_TEST_TMPDIR/real-gh-config" "$REAL_CALLS"
   run "$VERIFY_GUARD_DIR/gh" search prs --limit 5
   [ "$status" -eq 0 ]
-  run "$VERIFY_GUARD_DIR/gh" auth token --user someone
-  [ "$status" -eq 0 ]
   run "$VERIFY_GUARD_DIR/gh" api "/repos/o/r/pulls/1/reviews?per_page=100"
   [ "$status" -eq 0 ]
 }
 
-@test "gh guard: review/merge/comment writes are denied, logged, and never reach real gh" {
-  for bad in "pr review 11 --approve" "pr merge 11" "pr comment 11 --body hi" "pr edit 11" "pr close 11" "issue comment 5 --body x" "auth login"; do
+@test "gh guard: the ENTIRE auth branch is denied — no credential handout (round-3 CRITICAL 1)" {
+  # A token obtained here defeats the whole mode: curl/python/node are not and
+  # cannot be allowlisted away, so the credential itself is the control point.
+  # --show-token variants matter: the old guard inspected only $2.
+  for bad in "auth token" "auth token --user someone" "auth status" "auth status --show-token" "auth login" "auth switch"; do
     run "$VERIFY_GUARD_DIR/gh" $bad
     [ "$status" -eq 86 ]
   done
-  [ "$(grep -c '^BLOCKED gh' "$VERIFY_GUARD_LOG")" -eq 7 ]
+  [ "$(grep -c '^BLOCKED gh auth' "$VERIFY_GUARD_LOG")" -eq 6 ]
+  ! grep -q "REAL-GH CALLED" "$REAL_CALLS"
+}
+
+@test "gh guard: review/merge/comment writes are denied, logged, and never reach real gh" {
+  for bad in "pr review 11 --approve" "pr merge 11" "pr comment 11 --body hi" "pr edit 11" "pr close 11" "issue comment 5 --body x"; do
+    run "$VERIFY_GUARD_DIR/gh" $bad
+    [ "$status" -eq 86 ]
+  done
+  [ "$(grep -c '^BLOCKED gh' "$VERIFY_GUARD_LOG")" -eq 6 ]
   ! grep -q "REAL-GH CALLED" "$REAL_CALLS"
 }
 
