@@ -26,20 +26,13 @@ load_config() {
   MIN_COMMIT_AGE="${MIN_COMMIT_AGE:-40m}"
   REVIEW_FREQUENCY="${REVIEW_FREQUENCY:-2h}"
   INFLIGHT_TTL="${INFLIGHT_TTL:-1h}"
-  # Domain policy (pod-scope gate). Policy lives HERE — config.env overrides
-  # either knob with a one-line edit; mechanism lives in pod_allowed().
-  # ALLOWED_PODS: exact Pod-column names from engineering-pods'
-  # repositories-config.csv, |-separated. The default set is every pod the
-  # poller has actually met MINUS "Otto - Core" (the 2026-07-27 incident's
-  # pod). "Otto - Property Services" is in it because that is
-  # otto-service-requests-service — the poller's own default WORK_CWD and its
-  # busiest repo; a pure LRX-only set would have silently stopped reviewing it.
-  # ALLOWED_EXTRA_REPOS: repo-level allowlist for repos the pods map cannot
-  # place — either ABSENT from it, or present with an EMPTY Pod cell, both of
-  # which fail closed forever otherwise. services-contracts is the latter: it
-  # HAS a row (line 764 of repositories-config.csv) whose Pod cell is empty,
-  # so the empty-cell branch is what it would hit without this allowlist.
-  ALLOWED_PODS="${ALLOWED_PODS:-Otto - Leasing|Otto - Resident Experience|Otto - Property Services|Otto - Shared}"
+  # Domain policy. The allowed repo set is DERIVED per tick from code
+  # ownership (see derive_owned_repos) — there is no repo list to maintain
+  # here, deliberately: a frozen list rots the day a `-co` membership changes.
+  # ALLOWED_EXTRA_REPOS is the one additive override, for repos with no `-co`
+  # team that are nevertheless reviewed: services-contracts is the live case
+  # (no `<repo>-co` team exists for it, yet it carries real review requests).
+  # |-separated; config.env overrides it with a one-line edit.
   ALLOWED_EXTRA_REPOS="${ALLOWED_EXTRA_REPOS:-services-contracts}"
 }
 
@@ -504,74 +497,122 @@ SSH_EOF
   chmod +x "$VERIFY_GUARD_DIR/gh" "$VERIFY_GUARD_DIR/git" "$VERIFY_GUARD_DIR/verify-ssh"
 }
 
-# Resolve the freshest pods map into PODS_CSV_FILE. Prefers origin/main of the
-# engineering-pods repo (git show works regardless of which branch the checkout
-# sits on — the working tree is routinely parked on feature branches); falls
-# back to the working-tree file with a logged warning; leaves PODS_CSV_FILE
-# unset/missing when neither resolves, which pod_allowed treats as fail-closed.
-# PR_REVIEW_PODS_CSV overrides everything (tests).
-PODS_CSV_FILE=""
-resolve_pods_csv() {
-  if [[ -n "${PR_REVIEW_PODS_CSV:-}" ]]; then
-    PODS_CSV_FILE="$PR_REVIEW_PODS_CSV"
+# Resolve the freshest code-owner map into OWNED_CSV_FILE. Prefers origin/main
+# of the engineering-pods repo (git show works regardless of which branch that
+# checkout sits on — it is routinely parked on feature branches); falls back to
+# the working-tree copy with a logged warning; leaves the path missing when
+# neither resolves, which derive_owned_repos treats as fail-closed.
+# PR_REVIEW_OWNED_CSV overrides everything (tests).
+OWNED_CSV_FILE=""
+resolve_owned_csv() {
+  if [[ -n "${PR_REVIEW_OWNED_CSV:-}" ]]; then
+    OWNED_CSV_FILE="$PR_REVIEW_OWNED_CSV"
     return 0
   fi
   local pods_repo="$HOME/projects/work/engineering-pods"
-  local cache="$STATE_DIR/pods-map.csv"
+  local cache="$STATE_DIR/code-owner-map.csv"
   mkdir -p "$STATE_DIR"
   if git -C "$pods_repo" fetch origin main --quiet 2>/dev/null \
-     && git -C "$pods_repo" show origin/main:config/repositories-config.csv > "$cache" 2>/dev/null; then
-    PODS_CSV_FILE="$cache"
+     && git -C "$pods_repo" show origin/main:config/code-owner-team-member.csv > "$cache" 2>/dev/null; then
+    OWNED_CSV_FILE="$cache"
     return 0
   fi
-  if [[ -f "$pods_repo/config/repositories-config.csv" ]]; then
-    echo "[$(date -Iseconds)] WARNING: pods-map fetch from origin/main failed — using the on-disk working-tree copy (may be stale)"
-    PODS_CSV_FILE="$pods_repo/config/repositories-config.csv"
+  if [[ -f "$pods_repo/config/code-owner-team-member.csv" ]]; then
+    echo "[$(date -Iseconds)] WARNING: code-owner-map fetch from origin/main failed — using the on-disk working-tree copy (may be stale)"
+    OWNED_CSV_FILE="$pods_repo/config/code-owner-team-member.csv"
     return 0
   fi
-  echo "[$(date -Iseconds)] WARNING: pods map unavailable (no fetch, no on-disk copy) — domain gate will skip every PR (fail closed)"
-  PODS_CSV_FILE="$cache.missing"
+  OWNED_CSV_FILE="$cache.missing"
 }
 
-# Domain gate: is <repo> ours to auto-review? Keys on the Pod column of the
-# engineering-pods CSV ('","'-separated quoted fields: 2=Repository, 14=Pod) —
-# ownership is authoritative there and must never be inferred from commit
-# activity. rc 0 = allowed. rc 1 = refused, with the reason (including the
-# resolved pod) on stdout for the caller's skip line. Fail closed on every
-# unresolved shape: missing CSV, repo without a row, empty pod not in the
-# extra-repos escape hatch, pod outside ALLOWED_PODS.
-pod_allowed() {
-  local repo="$1"
-  local extra
+# Derive the set of repos this poller may auto-review from the code-owner map:
+# every `<repo>-co` team $WORK_GH_USER belongs to IS a repo it reviews, because
+# that membership is what generates the review requests in the first place.
+#
+# Why not the pod columns (the gate this replaces): pod data was wrong in BOTH
+# directions for this purpose — repo pod-ownership admitted
+# otto-business-process-service ("Otto - Core", the 2026-07-27 incident repo,
+# which this login does not own), while pod MEMBERSHIP (team-member.csv) lists
+# the engineer under otto-property-services + otto-resident-experience and omits
+# otto-leasing outright. Code ownership is the signal that actually drives
+# review requests, so it is the one the gate keys on.
+#
+# Identity: this map's `Member` column holds GITHUB LOGINS (verified: zero rows
+# contain "@"), and the poller already knows its own login as $WORK_GH_USER —
+# so no login->email bridge is needed. The email form lives only in
+# team-member.csv, the pod file this gate no longer reads.
+#
+# Populates OWNED_REPOS (newline-separated). rc 0 = derived. rc 1 = refuse
+# everything this tick, with a DISTINCT reason on stdout per failure arm:
+# unavailable map / unparseable shape / a -co-less team name / zero matches.
+OWNED_REPOS=""
+derive_owned_repos() {
+  OWNED_REPOS=""
+  if [[ -z "${OWNED_CSV_FILE:-}" || ! -f "$OWNED_CSV_FILE" ]]; then
+    echo "code-owner map unavailable (no fetch, no cached or on-disk copy)"
+    return 1
+  fi
+  # Validate the schema before trusting a parse: a silently-changed header must
+  # fail loudly, never degrade into "matched nothing" (which reads as "owns
+  # nothing" and would mute the loop). An empty file lands here too.
+  local header
+  header=$(head -1 "$OWNED_CSV_FILE" 2>/dev/null || echo "")
+  if [[ "$header" != '"Team","Pod","Member"' ]]; then
+    echo "code-owner map has an unexpected header ('${header:-<empty file>}' != '\"Team\",\"Pod\",\"Member\"') — refusing to guess its shape"
+    return 1
+  fi
+  local teams
+  teams=$(awk -F'","' -v me="$WORK_GH_USER" '
+    NR == 1 { next }
+    {
+      team = $1; sub(/^"/, "", team)
+      member = $3; sub(/"$/, "", member)
+      if (member == me) print team
+    }' "$OWNED_CSV_FILE")
+  if [[ -z "$teams" ]]; then
+    # The loudest arm on purpose: indistinguishable from "owns nothing", and a
+    # silent mute is the exact failure class this whole repair exists to kill.
+    echo "ZERO code-owner teams matched '$WORK_GH_USER' in the code-owner map — refusing every PR this tick. A renamed login or a mangled map looks identical to 'owns nothing'; check the map or set ALLOWED_EXTRA_REPOS"
+    return 1
+  fi
+  local team repo
+  while IFS= read -r team; do
+    [[ -z "$team" ]] && continue
+    if [[ "$team" != *-co ]]; then
+      echo "code-owner map has a team name without the -co suffix ('$team') — refusing to guess which repo it means"
+      return 1
+    fi
+    repo="${team%-co}"
+    OWNED_REPOS="$OWNED_REPOS$repo"$'\n'
+  done <<<"$teams"
+  return 0
+}
+
+# Domain gate: is <repo> ours to auto-review? rc 0 = allowed (derived ownership
+# or the explicit additive override). rc 1 = refused, reason on stdout for the
+# caller's skip line. Distinct from the clone check, which is CAPABILITY (can
+# this machine review it) rather than domain (should it).
+repo_owned() {
+  local repo="$1" extra owned
+  # Derivation FIRST, so a repo that passes on its own merit is reported as
+  # such even when it is also listed in the override — otherwise a stale
+  # override entry would masquerade as an ownership admit (and vice versa: an
+  # override-only admit must be visible, because it is the thing that keeps
+  # being reviewed after a -co membership goes away).
+  while IFS= read -r owned; do
+    if [[ -n "$owned" && "$owned" == "$repo" ]]; then
+      echo "code owner (${repo}-co)"
+      return 0
+    fi
+  done <<<"$OWNED_REPOS"
   IFS='|' read -r -a _extras <<<"${ALLOWED_EXTRA_REPOS:-}"
   for extra in "${_extras[@]:-}"; do
-    [[ -n "$extra" && "$extra" == "$repo" ]] && return 0
+    if [[ -n "$extra" && "$extra" == "$repo" ]]; then
+      echo "ALLOWED_EXTRA_REPOS override (not derived from code ownership)"
+      return 0
+    fi
   done
-  if [[ -z "${PODS_CSV_FILE:-}" || ! -f "$PODS_CSV_FILE" ]]; then
-    echo "pods map unavailable"
-    return 1
-  fi
-  local pod
-  if ! pod=$(awk -F'","' -v r="$repo" '$2 == r {p=$14; sub(/"$/,"",p); print p; found=1; exit} END {exit found?0:1}' "$PODS_CSV_FILE"); then
-    # DISTINCT from a foreign-pod refusal: absence means the map (or
-    # ALLOWED_EXTRA_REPOS) needs a human, not that the repo is out of scope.
-    # Loud on purpose — a silently fail-closed repo goes quiet forever and
-    # nobody learns why. (Sibling shape: a row WITH an empty Pod cell, below.)
-    echo "repo ABSENT from the pods map — fail closed; add it to the map or to ALLOWED_EXTRA_REPOS if it should be reviewed"
-    return 1
-  fi
-  if [[ -z "$pod" ]]; then
-    # The branch services-contracts really hits (row present, Pod cell blank)
-    # when it is not in ALLOWED_EXTRA_REPOS.
-    echo "pod cell EMPTY in the pods map — fail closed; add to ALLOWED_EXTRA_REPOS if legitimate"
-    return 1
-  fi
-  local allowed
-  IFS='|' read -r -a _pods <<<"${ALLOWED_PODS:-}"
-  for allowed in "${_pods[@]:-}"; do
-    [[ -n "$allowed" && "$allowed" == "$pod" ]] && return 0
-  done
-  echo "pod '$pod' outside allowed domain"
+  echo "not a code owner of it ($WORK_GH_USER is not in ${repo}-co) — add the membership upstream, or ALLOWED_EXTRA_REPOS if it should be reviewed anyway"
   return 1
 }
 
@@ -580,9 +621,10 @@ pod_allowed() {
 # Writes surviving PR URLs into the FILTER_SURVIVORS array (caller reads it).
 # Prints "  skip #N: <reason>" log lines to stdout so the poller log captures them.
 FILTER_SURVIVORS=()
+OWNED_GATE_FAILED=0
 filter_prs() {
   FILTER_SURVIVORS=()
-  local me="aleksandr-beliakov-rs"
+  local me="$WORK_GH_USER"
   local ledger="$LEDGER_FILE"
   local now_epoch; now_epoch=$(date +%s)
   local min_seconds; min_seconds=$(duration_to_seconds "$MIN_COMMIT_AGE") || {
@@ -623,14 +665,20 @@ filter_prs() {
       continue
     fi
 
-    # 2b. Domain check — SHOULD we: repo→pod ownership, distinct from the clone
+    # 2b. Domain check — SHOULD we: code ownership, distinct from the clone
     # check above (a cloned repo is not necessarily ours; the 2026-07-27
-    # incident auto-approved in an Otto-Core repo purely because the author was
-    # on the team list and the repo happened to be cloned). Distinct message so
-    # the log shows WHICH gate fired.
-    local pod_reason
-    if ! pod_reason=$(pod_allowed "$repo"); then
-      echo "  skip #$number ($owner/$repo): domain gate — $pod_reason"
+    # incident auto-approved in a repo this login does not own purely because
+    # the author was on the team list and the repo happened to be cloned).
+    # Distinct message so the log shows WHICH gate fired.
+    if [[ "$OWNED_GATE_FAILED" == "1" ]]; then
+      echo "  skip #$number ($owner/$repo): domain gate unavailable (see the ERROR above) — fail closed"
+      continue
+    fi
+    local owned_reason
+    if owned_reason=$(repo_owned "$repo"); then
+      echo "  admit #$number ($owner/$repo): domain gate — $owned_reason"
+    else
+      echo "  skip #$number ($owner/$repo): domain gate — $owned_reason"
       continue
     fi
 
@@ -941,10 +989,35 @@ OSA
 
   # Phase 1 in bash: only invoke Claude when ≥1 PR survives all filters.
   # filter_prs populates FILTER_SURVIVORS and prints skip reasons to stdout.
-  resolve_pods_csv
+  # Domain gate input: derive the owned-repo set once per tick. Any failure
+  # arm refuses EVERY PR (fail closed) and says which arm fired — a muted loop
+  # must never be indistinguishable from an empty queue.
+  OWNED_GATE_FAILED=0
+  resolve_owned_csv
+  # Capture the reason via a redirect, NOT `$(derive_owned_repos)`: a command
+  # substitution forks a subshell, so the OWNED_REPOS it builds would be
+  # discarded and every repo would look unowned — a silent full mute.
+  local owned_out
+  owned_out=$(mktemp)
+  if ! derive_owned_repos > "$owned_out"; then
+    echo "[$(date -Iseconds)] ERROR: domain gate unavailable — $(cat "$owned_out")"
+    OWNED_GATE_FAILED=1
+  fi
+  rm -f "$owned_out"
+
   if ! filter_prs; then
     echo "[$(date -Iseconds)] filter failed, skipping tick"
     exit 0
+  fi
+
+  # A muted domain gate must NOT terminate like a healthy empty queue: it
+  # skipped 100% of the queue for an infrastructure reason, and `cmd_status`
+  # reads exactly these terminal lines. Same contract as the findings
+  # assertion — a tick that reviewed nothing because something broke never
+  # says "poll done" (the 189-silent-ticks shape, different cause).
+  if [[ "$OWNED_GATE_FAILED" == "1" ]]; then
+    echo "[$(date -Iseconds)] poll FAILED — domain gate unavailable, every PR skipped this tick (see the ERROR above); nothing was reviewed"
+    exit 1
   fi
 
   if [[ ${#FILTER_SURVIVORS[@]} -eq 0 ]]; then
