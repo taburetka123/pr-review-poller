@@ -34,8 +34,11 @@ load_config() {
   # pod). "Otto - Property Services" is in it because that is
   # otto-service-requests-service — the poller's own default WORK_CWD and its
   # busiest repo; a pure LRX-only set would have silently stopped reviewing it.
-  # ALLOWED_EXTRA_REPOS: repo-level allowlist for repos ABSENT from the CSV
-  # (services-contracts has no row at all), which otherwise fail closed forever.
+  # ALLOWED_EXTRA_REPOS: repo-level allowlist for repos the pods map cannot
+  # place — either ABSENT from it, or present with an EMPTY Pod cell, both of
+  # which fail closed forever otherwise. services-contracts is the latter: it
+  # HAS a row (line 764 of repositories-config.csv) whose Pod cell is empty,
+  # so the empty-cell branch is what it would hit without this allowlist.
   ALLOWED_PODS="${ALLOWED_PODS:-Otto - Leasing|Otto - Resident Experience|Otto - Property Services|Otto - Shared}"
   ALLOWED_EXTRA_REPOS="${ALLOWED_EXTRA_REPOS:-services-contracts}"
 }
@@ -397,6 +400,11 @@ prune_inflight_holds() {
 #       GH_CONFIG_DIR does not gate. The empty GH_CONFIG_DIR below still
 #       de-authenticates the plain homebrew binary, so it is kept as
 #       defence-in-depth, but it is NOT a deauthentication guarantee.
+#   (c) The Keychain directly: `security find-generic-password -s
+#       "gh:github.com" -w` returns the token in ONE command, touching no gh,
+#       no git and no MCP. This is the shortest route of the three and the
+#       reason (a) is not hypothetical — name it explicitly, never fold it
+#       into (a)'s "obtained by other means".
 VERIFY_GUARD_DIR=""
 VERIFY_GUARD_LOG=""
 setup_verify_guard() {
@@ -548,12 +556,14 @@ pod_allowed() {
     # DISTINCT from a foreign-pod refusal: absence means the map (or
     # ALLOWED_EXTRA_REPOS) needs a human, not that the repo is out of scope.
     # Loud on purpose — a silently fail-closed repo goes quiet forever and
-    # nobody learns why (services-contracts is exactly this shape).
+    # nobody learns why. (Sibling shape: a row WITH an empty Pod cell, below.)
     echo "repo ABSENT from the pods map — fail closed; add it to the map or to ALLOWED_EXTRA_REPOS if it should be reviewed"
     return 1
   fi
   if [[ -z "$pod" ]]; then
-    echo "pod cell empty in the pods map — fail closed; add to ALLOWED_EXTRA_REPOS if legitimate"
+    # The branch services-contracts really hits (row present, Pod cell blank)
+    # when it is not in ALLOWED_EXTRA_REPOS.
+    echo "pod cell EMPTY in the pods map — fail closed; add to ALLOWED_EXTRA_REPOS if legitimate"
     return 1
   fi
   local allowed
@@ -889,7 +899,7 @@ OSA
     export GH_CONFIG_DIR="$VERIFY_GUARD_DIR/gh-config-empty"
     export GIT_SSH_COMMAND="$VERIFY_GUARD_DIR/verify-ssh"
     export PR_REVIEW_NO_MCP=1
-    echo "[$(date -Iseconds)] VERIFY MODE: no GitHub write on any gh / git / MCP path this tick (gh guard denies writes AND the whole auth branch — no credential handout; no MCP servers in claude sessions; push-blocked git/ssh). NOT airtight — named residuals: (1) raw HTTP clients (curl/python3/node/perl) cannot be allowlisted away, so a credential obtained by other means still reaches api.github.com; (2) the account-routing gh wrapper invoked by ABSOLUTE path bypasses this guard and reads the macOS keyring, which no env var gates. Guard log: $VERIFY_GUARD_LOG"
+    echo "[$(date -Iseconds)] VERIFY MODE: no GitHub write on any gh / git / MCP path this tick (gh guard denies writes AND the whole auth branch — no credential handout; no MCP servers in claude sessions; push-blocked git/ssh). NOT airtight — named residuals: (1) raw HTTP clients (curl/python3/node/perl) cannot be allowlisted away, so a credential obtained by other means still reaches api.github.com; (2) the account-routing gh wrapper invoked by ABSOLUTE path bypasses this guard and reads the macOS keyring, which no env var gates; (3) the Keychain directly — 'security find-generic-password -s gh:github.com -w' returns the token in ONE command, touching no gh, no git, no MCP. Guard log: $VERIFY_GUARD_LOG"
   fi
 
   echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE, frequency=$REVIEW_FREQUENCY, post=$POST, verify=$VERIFY, cwd=$WORK_CWD, gh_user=$WORK_GH_USER)"

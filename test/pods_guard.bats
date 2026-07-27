@@ -11,7 +11,7 @@ setup() {
 "GhStatus","Repository","CreatedDatePst","ModifiedDatePst","Type","Status","IsArchived","Visibility","IsFork","SolutionType","AppType","PrimaryLanguage","DevelopmentType","Pod"
 "FoundInGh","otto-leases-service","1/1/2025","1/1/2025","Service","Active","FALSE","Internal","FALSE","","","Kotlin","TrunkBased","Otto - Leasing"
 "FoundInGh","otto-business-process-service","1/1/2025","1/1/2025","Service","Active","FALSE","Internal","FALSE","","","Kotlin","TrunkBased","Otto - Core"
-"FoundInGh","otto-emptypod-service","2/8/2023","2/8/2023","Service","Active","FALSE","Internal","FALSE","","","Kotlin","TrunkBased",""
+"FoundInGh","services-contracts","2/8/2023","2/8/2023","Protobuf","Active","FALSE","Internal","FALSE","Protobuf","","Protobuf","TrunkBased",""
 CSV
   ALLOWED_PODS="Otto - Leasing|Otto - Resident Experience|Otto - Shared"
   ALLOWED_EXTRA_REPOS="services-contracts"
@@ -38,20 +38,18 @@ CSV
   [[ "$output" != *"outside allowed domain"* ]]
 }
 
-@test "CSV-absent repo passes only via the explicit repo allowlist" {
-  # services-contracts has no row at all in the real CSV.
+@test "services-contracts: real shape is a PRESENT row with an EMPTY Pod cell, allowed only via the repo allowlist" {
+  # Verified against the real map: line 764 of repositories-config.csv has the
+  # row with a blank Pod cell — so the EMPTY-cell branch is what fires for it,
+  # not the absent-repo branch. (A round-4 PR-body edit wrongly called it
+  # absent; this test pins the truth so the claim cannot drift again.)
   run pod_allowed services-contracts
   [ "$status" -eq 0 ]
   ALLOWED_EXTRA_REPOS=""
   run pod_allowed services-contracts
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ABSENT from the pods map"* ]]
-}
-
-@test "empty-pod cell is refused with its own reason (not conflated with absent)" {
-  run pod_allowed otto-emptypod-service
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"empty in the pods map"* ]]
+  [[ "$output" == *"pod cell EMPTY in the pods map"* ]]
+  [[ "$output" != *"ABSENT"* ]]
 }
 
 @test "the shipped default pod set covers every repo the poller actually meets" {

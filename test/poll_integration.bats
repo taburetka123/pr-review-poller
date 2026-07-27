@@ -92,6 +92,25 @@ CL
   chmod +x "$PR_REVIEW_POLLER_CLAUDE"
 }
 
+# The verify banner must never re-acquire the overclaim vocabulary that
+# round-3 Tier-2 punctured. Positive checks cannot see an ADDED phrase, so this
+# is the negative arm: strip the sanctioned "NOT airtight", then fail on any
+# remaining overclaim token. Case-insensitive — "STRUCTURALLY" must not slip by.
+assert_banner_has_no_overclaim() {
+  local banner lower
+  banner=$(printf '%s\n' "$1" | grep 'VERIFY MODE' || true)
+  [ -n "$banner" ] || return 1
+  lower=$(printf '%s' "$banner" | tr '[:upper:]' '[:lower:]')
+  lower=${lower//not airtight/}
+  local bad
+  for bad in structurally impossible airtight "fully covered" "cannot write"; do
+    case "$lower" in
+      *"$bad"*) echo "OVERCLAIM in verify banner: '$bad'"; return 1 ;;
+    esac
+  done
+  return 0
+}
+
 # Every recorded claude call must carry exactly ONE --model, valued as the
 # roster pin. Presence is not enough: claude's CLI takes the LAST --model
 # (spiked empirically by the Tier-2 delta), so a later duplicate silently
@@ -173,12 +192,18 @@ CSV
   write_claude_stub writes
   run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
   [ "$status" -eq 0 ]
-  # Banner states the accurate claim (no gh/git/MCP write path) AND names the
-  # residuals — an overclaim here is the failure this wording replaced.
+  # Banner states the accurate claim (no gh/git/MCP write path) AND names all
+  # three residuals — an overclaim here is the failure this wording replaced.
   [[ "$output" == *"VERIFY MODE: no GitHub write on any gh / git / MCP path"* ]]
   [[ "$output" == *"NOT airtight"* ]]
   [[ "$output" == *"raw HTTP clients"* ]]
   [[ "$output" == *"keyring"* ]]
+  [[ "$output" == *"security"* ]]
+  # NEGATIVE ARM: positive substring checks catch an OMITTED residual but are
+  # blind to an ADDED overclaim — a re-added "structurally impossible" passed
+  # every check above. Forbid the overclaim vocabulary outright. "NOT airtight"
+  # is the one sanctioned use of "airtight", so strip it before matching.
+  assert_banner_has_no_overclaim "$output"
   [[ "$output" == *"poll done"* ]]
   grep -q -- "--strict-mcp-config" "$BATS_TEST_TMPDIR/claude-argv"
   assert_every_call_pinned
