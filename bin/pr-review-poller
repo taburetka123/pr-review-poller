@@ -709,7 +709,7 @@ OSA
   local TICK_START; TICK_START=$(date +%s)
   echo "[$(date -Iseconds)] launching ${#FILTER_SURVIVORS[@]} reviewer(s) via $RUN_ALL_SCRIPT"
   if ! build_review_specs "${FILTER_SURVIVORS[@]}" | "$RUN_ALL_SCRIPT"; then
-    echo "[$(date -Iseconds)] poll FAILED — pr-review-run-all exited nonzero"
+    echo "[$(date -Iseconds)] poll FAILED — pr-review-run-all exited nonzero; ${#FILTER_SURVIVORS[@]} PR(s) remain in-flight, TTL re-queues in $INFLIGHT_TTL, or 'pr-review-poller clear-hold' to retry now"
     cleanup_dispatched "${FILTER_SURVIVORS[@]}"
     exit 1
   fi
