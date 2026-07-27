@@ -60,19 +60,39 @@ RA
 }
 
 write_claude_stub() {  # $1 = "writes" | "silent"
-  # Both stubs record their argv so tests can assert on what claude was
-  # actually invoked with, not just on cmd_run's log echo of it.
+  # Both stubs APPEND their argv (one element per line, --CALL-- terminator)
+  # so tests can assert on EVERY claude invocation of the tick, not just the
+  # last one — a retry path added later must not escape the pin guard
+  # (Tier-2 delta finding F).
   if [ "$1" = "writes" ]; then
     cat > "$PR_REVIEW_POLLER_CLAUDE" <<'CL'
 #!/bin/bash
-printf '%s\n' "$@" > "${BATS_TEST_TMPDIR:?}/claude-argv"
+{ printf '%s\n' "$@"; echo '--CALL--'; } >> "${BATS_TEST_TMPDIR:?}/claude-argv"
 mkdir -p "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service"
 printf '=== stub ===\nAction: HOLD\n' >> "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service/265.log"
 CL
   else
-    printf '#!/bin/bash\nprintf "%%s\\n" "$@" > "${BATS_TEST_TMPDIR:?}/claude-argv"\nexit 0\n' > "$PR_REVIEW_POLLER_CLAUDE"
+    cat > "$PR_REVIEW_POLLER_CLAUDE" <<'CL'
+#!/bin/bash
+{ printf '%s\n' "$@"; echo '--CALL--'; } >> "${BATS_TEST_TMPDIR:?}/claude-argv"
+exit 0
+CL
   fi
   chmod +x "$PR_REVIEW_POLLER_CLAUDE"
+}
+
+# Every recorded claude call must carry exactly ONE --model, valued as the
+# roster pin. Presence is not enough: claude's CLI takes the LAST --model
+# (spiked empirically by the Tier-2 delta), so a later duplicate silently
+# shadows the pin (finding E); and a new unpinned call site must fail, not
+# hide behind the last-written record (finding F).
+assert_every_call_pinned() {
+  awk '
+    /^--CALL--$/ { calls++; if (models != 1 || value != "claude-opus-5") bad=1; models=0; value=""; next }
+    prev { value=$0; prev=0 }
+    $0 == "--model" { models++; prev=1 }
+    END { exit (calls < 1 || bad) ? 1 : 0 }
+  ' "$BATS_TEST_TMPDIR/claude-argv"
 }
 
 @test "RED: triage that writes no findings log fails the tick loudly" {
@@ -108,12 +128,11 @@ CL
   [ "$(cat "$RUN_ALL_INPUT")" = $'otto-leases-service\t265\tLRX-9992-branch\troofstock/otto-leases-service\t' ]
   # And the argv claude was ACTUALLY invoked with (not just the log echo):
   grep -q -- "--reviews-pre-run" "$BATS_TEST_TMPDIR/claude-argv"
-  # Model pin at the act level (Tier-2 finding 1): dropping the CLAUDE_FLAGS
-  # expansion from the real call must go red here even with the assignment
-  # intact. The stub records one argv element per line — join before matching
-  # so this asserts the adjacent "--model claude-opus-5" pair, not two tokens
-  # anywhere.
-  [[ "$(tr '\n' ' ' < "$BATS_TEST_TMPDIR/claude-argv")" == *"--model claude-opus-5 "* ]]
+  # Model pin at the act level (Tier-2 finding 1 + delta findings E/F):
+  # every recorded call must carry exactly one --model with the roster value —
+  # dropping the expansion, shadowing it with a later duplicate --model, or
+  # adding a new unpinned call site must all go red.
+  assert_every_call_pinned
 }
 
 @test "repo owned by a foreign pod is skipped by the domain gate, reviewer never launched" {
