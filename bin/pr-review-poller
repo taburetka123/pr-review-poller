@@ -6,13 +6,17 @@ set -euo pipefail
 CONFIG_FILE="${PR_REVIEW_POLLER_CONFIG:-$HOME/.config/pr-review-poller/config.env}"
 PLIST_DST="$HOME/Library/LaunchAgents/com.kezoo.pr-review-poller.plist"
 LABEL="com.kezoo.pr-review-poller"
-LOCK_FILE="$HOME/.local/state/pr-review-poller.lock"
-LAST_RUN_FILE="$HOME/.local/state/pr-review-poller/last-run.epoch"
-LAST_PRUNE_FILE="$HOME/.local/state/pr-review-poller/last-prune.epoch"
+STATE_DIR="${PR_REVIEW_POLLER_STATE_DIR:-$HOME/.local/state/pr-review-poller}"
+LOCK_FILE="${PR_REVIEW_POLLER_LOCK_FILE:-$HOME/.local/state/pr-review-poller.lock}"
+LAST_RUN_FILE="$STATE_DIR/last-run.epoch"
+LAST_PRUNE_FILE="$STATE_DIR/last-prune.epoch"
+LEDGER_FILE="$STATE_DIR/held.json"
 STDOUT_LOG="$HOME/worktrees/.pr-review-poller-stdout.log"
 STDERR_LOG="$HOME/worktrees/.pr-review-poller-stderr.log"
-FINDINGS_DIR="$HOME/worktrees/.pr-review-findings"
-CLAUDE="/Users/kezoo/.local/bin/claude"
+FINDINGS_DIR="${PR_REVIEW_FINDINGS_ROOT:-$HOME/worktrees/.pr-review-findings}"
+CLAUDE="${PR_REVIEW_POLLER_CLAUDE:-/Users/kezoo/.local/bin/claude}"
+RUN_ALL_SCRIPT="${PR_REVIEW_RUN_ALL:-$HOME/.claude/scripts/pr-review-run-all}"
+WORKTREE_SCRIPT="${PR_REVIEW_WORKTREE_SCRIPT:-$HOME/.claude/scripts/pr-review-worktree}"
 
 load_config() {
   if [[ -f "$CONFIG_FILE" ]]; then
@@ -144,7 +148,7 @@ cmd_status() {
     [[ -n "$LAST" ]] && echo "last log entry:   $LAST"
   fi
 
-  HELD="$HOME/.local/state/pr-review-poller/held.json"
+  HELD="$LEDGER_FILE"
   if [[ -f "$HELD" ]] && [[ $(jq 'length' "$HELD" 2>/dev/null || echo 0) -gt 0 ]]; then
     echo
     echo "held (waiting for human review):"
@@ -333,7 +337,7 @@ FILTER_SURVIVORS=()
 filter_prs() {
   FILTER_SURVIVORS=()
   local me="aleksandr-beliakov-rs"
-  local ledger="$HOME/.local/state/pr-review-poller/held.json"
+  local ledger="$LEDGER_FILE"
   local now_epoch; now_epoch=$(date +%s)
   local min_seconds; min_seconds=$(duration_to_seconds "$MIN_COMMIT_AGE") || {
     echo "invalid --min-commit-age: $MIN_COMMIT_AGE" >&2
@@ -375,7 +379,7 @@ filter_prs() {
 
     # 3. Single gh pr view for all remaining filters
     local info
-    if ! info=$(gh pr view "$number" -R "$owner/$repo" --json reviews,commits 2>&1); then
+    if ! info=$(gh pr view "$number" -R "$owner/$repo" --json reviews,commits,headRefName 2>&1); then
       echo "  skip #$number ($owner/$repo): gh pr view failed ($info)"
       continue
     fi
@@ -414,6 +418,13 @@ filter_prs() {
       continue
     fi
 
+    local head_ref
+    head_ref=$(echo "$info" | jq -r '.headRefName // empty' 2>/dev/null)
+    if [[ -z "$head_ref" ]]; then
+      echo "  skip #$number ($owner/$repo): could not parse headRefName"
+      continue
+    fi
+
     # 6. Already-approved-by-anyone skip
     local approved
     approved=$(echo "$info" | jq '[.reviews | group_by(.author.login)[] | max_by(.submittedAt) | select(.state == "APPROVED")] | length > 0' 2>/dev/null)
@@ -443,13 +454,35 @@ filter_prs() {
 
     # Tab-separated tuple so cmd_run can pre-write in-flight ledger entries
     # before invoking claude (needs head_oid, not just URL).
-    FILTER_SURVIVORS+=("$owner"$'\t'"$repo"$'\t'"$number"$'\t'"$head_oid"$'\t'"https://github.com/$owner/$repo/pull/$number")
+    FILTER_SURVIVORS+=("$owner"$'\t'"$repo"$'\t'"$number"$'\t'"$head_oid"$'\t'"$head_ref"$'\t'"$my_last_oid"$'\t'"https://github.com/$owner/$repo/pull/$number")
   done < <(echo "$raw" | jq -r '.[] | [
       (.repository.nameWithOwner | split("/")[0]),
       (.repository.nameWithOwner | split("/")[1]),
       (.number | tostring),
       .author.login
     ] | @tsv')
+}
+
+# One pr-review-run-all spec line per survivor:
+#   <repo>\t<pr>\t<branch>\t<owner/repo>\t<since-commit-or-empty>
+# Splits by parameter expansion, not `IFS=$'\t' read`: bash classifies tab as
+# "IFS whitespace" and collapses consecutive occurrences even when IFS is set
+# to tab alone, so `read` silently drops the empty my_last_oid field (position
+# 6) and shifts url into it. Parameter-expansion pattern matching is literal
+# and does not collapse.
+build_review_specs() {
+  local survivor rest owner repo number head_oid head_ref my_last url
+  for survivor in "$@"; do
+    rest="$survivor"
+    owner="${rest%%$'\t'*}";    rest="${rest#*$'\t'}"
+    repo="${rest%%$'\t'*}";     rest="${rest#*$'\t'}"
+    number="${rest%%$'\t'*}";   rest="${rest#*$'\t'}"
+    head_oid="${rest%%$'\t'*}"; rest="${rest#*$'\t'}"
+    head_ref="${rest%%$'\t'*}"; rest="${rest#*$'\t'}"
+    my_last="${rest%%$'\t'*}";  rest="${rest#*$'\t'}"
+    url="$rest"
+    printf '%s\t%s\t%s\t%s/%s\t%s\n' "$repo" "$number" "$head_ref" "$owner" "$repo" "$my_last"
+  done
 }
 
 cmd_run() {
@@ -551,7 +584,7 @@ OSA
   # has not run yet (FILTER_SURVIVORS empty, no in-flight written this tick), so
   # this only ever prunes prior-run entries. Lets a crash-stranded PR re-surface.
   local _inflight_ttl; _inflight_ttl=$(duration_to_seconds "$INFLIGHT_TTL") || _inflight_ttl=3600
-  prune_inflight_holds "$HOME/.local/state/pr-review-poller/held.json" "$(date +%s)" "$_inflight_ttl" \
+  prune_inflight_holds "$LEDGER_FILE" "$(date +%s)" "$_inflight_ttl" \
     || echo "[$(date -Iseconds)] in-flight prune failed (non-fatal)"
 
   # Phase 1 in bash: only invoke Claude when ≥1 PR survives all filters.
@@ -573,13 +606,23 @@ OSA
   # placeholder persists, so the next tick's filter step 7 skips this exact
   # (PR, commit) instead of burning another retry. User runs
   # `pr-review-poller clear-hold <pr>` to force a re-review.
-  local LEDGER="$HOME/.local/state/pr-review-poller/held.json"
+  local LEDGER="$LEDGER_FILE"
   mkdir -p "$(dirname "$LEDGER")"
   [[ -f "$LEDGER" ]] || echo '{}' > "$LEDGER"
   local _now; _now=$(date -Iseconds)
   local _pr_urls=()
   for survivor in "${FILTER_SURVIVORS[@]}"; do
-    IFS=$'\t' read -r _o _r _n _head _url <<<"$survivor"
+    # See build_review_specs: `IFS=$'\t' read` collapses a middle empty field
+    # (my_last_oid, e.g. first review) and shifts url into it — split by
+    # parameter expansion instead.
+    local _rest="$survivor"
+    _o="${_rest%%$'\t'*}";    _rest="${_rest#*$'\t'}"
+    _r="${_rest%%$'\t'*}";    _rest="${_rest#*$'\t'}"
+    _n="${_rest%%$'\t'*}";    _rest="${_rest#*$'\t'}"
+    _head="${_rest%%$'\t'*}"; _rest="${_rest#*$'\t'}"
+    _ref="${_rest%%$'\t'*}";  _rest="${_rest#*$'\t'}"
+    _since="${_rest%%$'\t'*}"; _rest="${_rest#*$'\t'}"
+    _url="$_rest"
     _pr_urls+=("$_url")
     local _tmp; _tmp=$(mktemp)
     jq --arg key "$_o/$_r#$_n" \
@@ -682,7 +725,7 @@ cmd_clear_hold() {
   if [[ -z "$arg" ]]; then
     echo "usage: pr-review-poller clear-hold <pr-url-or-number>" >&2; exit 2
   fi
-  local LEDGER="$HOME/.local/state/pr-review-poller/held.json"
+  local LEDGER="$LEDGER_FILE"
   if [[ ! -f "$LEDGER" ]]; then
     echo "no ledger at $LEDGER" >&2; exit 1
   fi
