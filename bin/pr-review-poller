@@ -560,7 +560,7 @@ tell application "iTerm"
     create tab with default profile
     delay 0.6
     tell current session of current tab
-      write text "$CLAUDE --model claude-opus-4-8 -p \"$SLASH\""
+      write text "$CLAUDE --model claude-opus-5 -p \"$SLASH\""
     end tell
   end tell
 end tell
