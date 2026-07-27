@@ -515,7 +515,22 @@ assert_findings_fresh() {
       missing=$((missing+1))
     fi
   done
+  # Exit codes wrap mod 256; unreachable at the --limit=50 survivor cap, but
+  # clamp so a future cap raise can never wrap missing back down to 0.
+  [[ "$missing" -gt 255 ]] && missing=255
   return "$missing"
+}
+
+# Best-effort worktree + result-file cleanup for every dispatched survivor.
+# Hoisted so every post-launch exit path (run-all failure included) leaves no
+# leaked worktree or stale result file for the next tick to trip over.
+cleanup_dispatched() {
+  local survivor _o _r _n _rest
+  for survivor in "$@"; do
+    IFS=$'\t' read -r _o _r _n _rest <<<"$survivor"
+    "$WORKTREE_SCRIPT" cleanup "$_r" "$_n" >/dev/null 2>&1 || true
+    rm -f "$PR_REVIEW_RESULT_DIR/$_n.md"
+  done
 }
 
 cmd_run() {
@@ -684,6 +699,7 @@ OSA
   echo "[$(date -Iseconds)] launching ${#FILTER_SURVIVORS[@]} reviewer(s) via $RUN_ALL_SCRIPT"
   if ! build_review_specs "${FILTER_SURVIVORS[@]}" | "$RUN_ALL_SCRIPT"; then
     echo "[$(date -Iseconds)] poll FAILED — pr-review-run-all exited nonzero"
+    cleanup_dispatched "${FILTER_SURVIVORS[@]}"
     exit 1
   fi
 
@@ -692,7 +708,7 @@ OSA
   # comments; effort medium is plenty for rule-driven triage.
   SLASH="$SLASH --reviews-pre-run"
   CLAUDE_FLAGS=(--model claude-opus-5 --effort medium)
-  echo "[$(date -Iseconds)] invoking claude (${CLAUDE_FLAGS[*]}) for triage of ${#_pr_urls[@]} PR(s): ${_pr_urls[*]}"
+  echo "[$(date -Iseconds)] invoking claude (${CLAUDE_FLAGS[*]}) for triage of ${#_pr_urls[@]} PR(s): $SLASH ${_pr_urls[*]}"
   local rc=0
   "$CLAUDE" "${CLAUDE_FLAGS[@]}" -p "$SLASH ${_pr_urls[*]}" || rc=$?
 
@@ -703,14 +719,10 @@ OSA
   local missing=0
   assert_findings_fresh "$TICK_START" "${FILTER_SURVIVORS[@]}" || missing=$?
 
-  for survivor in "${FILTER_SURVIVORS[@]}"; do
-    IFS=$'\t' read -r _o _r _n _rest <<<"$survivor"
-    "$WORKTREE_SCRIPT" cleanup "$_r" "$_n" >/dev/null 2>&1 || true
-    rm -f "$PR_REVIEW_RESULT_DIR/$_n.md"
-  done
+  cleanup_dispatched "${FILTER_SURVIVORS[@]}"
 
   if [[ $rc -ne 0 ]]; then
-    echo "[$(date -Iseconds)] poll FAILED — claude triage exited rc=$rc; ${#_pr_urls[@]} PR(s) remain in-flight, no retry until new commits or 'pr-review-poller clear-hold'"
+    echo "[$(date -Iseconds)] poll FAILED — claude triage exited rc=$rc; ${#_pr_urls[@]} PR(s) remain in-flight; TTL re-queues in $INFLIGHT_TTL, or 'pr-review-poller clear-hold' to retry now"
     exit "$rc"
   fi
   if [[ "$missing" -gt 0 ]]; then
