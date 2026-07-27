@@ -20,6 +20,13 @@ setup() {
   # prune gate: stamp fresh so prune_findings skips (no gh calls from prune)
   date +%s > "$PR_REVIEW_POLLER_STATE_DIR/last-prune.epoch"
 
+  # Domain gate fixture: without it the fail-closed pod gate refuses every PR.
+  export PR_REVIEW_PODS_CSV="$BATS_TEST_TMPDIR/pods.csv"
+  cat > "$PR_REVIEW_PODS_CSV" <<'CSV'
+"GhStatus","Repository","x","x","x","x","x","x","x","x","x","x","x","Pod","tail"
+"FoundInGh","otto-leases-service","x","x","x","x","x","x","x","x","x","x","x","Otto - Leasing","t"
+CSV
+
   # gh stub: auth token / search prs / pr view
   mkdir -p "$BATS_TEST_TMPDIR/bin"
   cat > "$BATS_TEST_TMPDIR/bin/gh" <<'GH'
@@ -107,6 +114,19 @@ CL
   # so this asserts the adjacent "--model claude-opus-5" pair, not two tokens
   # anywhere.
   [[ "$(tr '\n' ' ' < "$BATS_TEST_TMPDIR/claude-argv")" == *"--model claude-opus-5 "* ]]
+}
+
+@test "repo owned by a foreign pod is skipped by the domain gate, reviewer never launched" {
+  write_claude_stub writes
+  cat > "$PR_REVIEW_PODS_CSV" <<'CSV'
+"GhStatus","Repository","x","x","x","x","x","x","x","x","x","x","x","Pod","tail"
+"FoundInGh","otto-leases-service","x","x","x","x","x","x","x","x","x","x","x","Otto - Core","t"
+CSV
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"domain gate — pod 'Otto - Core' outside allowed domain"* ]]
+  [[ "$output" == *"no PRs survived filters"* ]]
+  [[ "$output" != *"launching"* ]]
 }
 
 @test "PR no longer OPEN is skipped before any reviewer is launched" {

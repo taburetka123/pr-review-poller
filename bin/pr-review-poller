@@ -26,6 +26,12 @@ load_config() {
   MIN_COMMIT_AGE="${MIN_COMMIT_AGE:-40m}"
   REVIEW_FREQUENCY="${REVIEW_FREQUENCY:-2h}"
   INFLIGHT_TTL="${INFLIGHT_TTL:-1h}"
+  # Domain policy (pod-scope gate). Policy lives HERE (config.env-overridable),
+  # mechanism in pod_allowed(). Pods per engineering-pods' repositories-config
+  # CSV; |-separated exact names. Extra repos = explicit escape hatch for
+  # legitimately pod-less repos (services-contracts has an empty Pod column).
+  ALLOWED_PODS="${ALLOWED_PODS:-Otto - Leasing|Otto - Resident Experience|Otto - Shared}"
+  ALLOWED_EXTRA_REPOS="${ALLOWED_EXTRA_REPOS:-services-contracts}"
 }
 
 # Pretty-print whichever scheduling key the plist uses. StartCalendarInterval
@@ -336,6 +342,71 @@ prune_inflight_holds() {
   fi
 }
 
+# Resolve the freshest pods map into PODS_CSV_FILE. Prefers origin/main of the
+# engineering-pods repo (git show works regardless of which branch the checkout
+# sits on — the working tree is routinely parked on feature branches); falls
+# back to the working-tree file with a logged warning; leaves PODS_CSV_FILE
+# unset/missing when neither resolves, which pod_allowed treats as fail-closed.
+# PR_REVIEW_PODS_CSV overrides everything (tests).
+PODS_CSV_FILE=""
+resolve_pods_csv() {
+  if [[ -n "${PR_REVIEW_PODS_CSV:-}" ]]; then
+    PODS_CSV_FILE="$PR_REVIEW_PODS_CSV"
+    return 0
+  fi
+  local pods_repo="$HOME/projects/work/engineering-pods"
+  local cache="$STATE_DIR/pods-map.csv"
+  mkdir -p "$STATE_DIR"
+  if git -C "$pods_repo" fetch origin main --quiet 2>/dev/null \
+     && git -C "$pods_repo" show origin/main:config/repositories-config.csv > "$cache" 2>/dev/null; then
+    PODS_CSV_FILE="$cache"
+    return 0
+  fi
+  if [[ -f "$pods_repo/config/repositories-config.csv" ]]; then
+    echo "[$(date -Iseconds)] WARNING: pods-map fetch from origin/main failed — using the on-disk working-tree copy (may be stale)"
+    PODS_CSV_FILE="$pods_repo/config/repositories-config.csv"
+    return 0
+  fi
+  echo "[$(date -Iseconds)] WARNING: pods map unavailable (no fetch, no on-disk copy) — domain gate will skip every PR (fail closed)"
+  PODS_CSV_FILE="$cache.missing"
+}
+
+# Domain gate: is <repo> ours to auto-review? Keys on the Pod column of the
+# engineering-pods CSV ('","'-separated quoted fields: 2=Repository, 14=Pod) —
+# ownership is authoritative there and must never be inferred from commit
+# activity. rc 0 = allowed. rc 1 = refused, with the reason (including the
+# resolved pod) on stdout for the caller's skip line. Fail closed on every
+# unresolved shape: missing CSV, repo without a row, empty pod not in the
+# extra-repos escape hatch, pod outside ALLOWED_PODS.
+pod_allowed() {
+  local repo="$1"
+  local extra
+  IFS='|' read -r -a _extras <<<"${ALLOWED_EXTRA_REPOS:-}"
+  for extra in "${_extras[@]:-}"; do
+    [[ -n "$extra" && "$extra" == "$repo" ]] && return 0
+  done
+  if [[ -z "${PODS_CSV_FILE:-}" || ! -f "$PODS_CSV_FILE" ]]; then
+    echo "pods map unavailable"
+    return 1
+  fi
+  local pod
+  if ! pod=$(awk -F'","' -v r="$repo" '$2 == r {p=$14; sub(/"$/,"",p); print p; found=1; exit} END {exit found?0:1}' "$PODS_CSV_FILE"); then
+    echo "pod unresolved (no row in pods map)"
+    return 1
+  fi
+  if [[ -z "$pod" ]]; then
+    echo "pod empty in pods map (add to ALLOWED_EXTRA_REPOS if legitimate)"
+    return 1
+  fi
+  local allowed
+  IFS='|' read -r -a _pods <<<"${ALLOWED_PODS:-}"
+  for allowed in "${_pods[@]:-}"; do
+    [[ -n "$allowed" && "$allowed" == "$pod" ]] && return 0
+  done
+  echo "pod '$pod' outside allowed domain"
+  return 1
+}
+
 # Phase 1 discovery + filtering. Same logic as ~/.claude/skills/kezoo-review-prs/SKILL.md
 # Phase 1, pulled into bash so empty/all-skipped ticks don't burn Claude tokens.
 # Writes surviving PR URLs into the FILTER_SURVIVORS array (caller reads it).
@@ -378,9 +449,20 @@ filter_prs() {
       continue
     fi
 
-    # 2. Repo-cloned check
+    # 2. Repo-cloned check — CAPABILITY: can this machine review it at all.
     if [[ ! -d "$HOME/projects/work/$repo" ]]; then
       echo "  skip #$number ($owner/$repo): ~/projects/work/$repo not cloned"
+      continue
+    fi
+
+    # 2b. Domain check — SHOULD we: repo→pod ownership, distinct from the clone
+    # check above (a cloned repo is not necessarily ours; the 2026-07-27
+    # incident auto-approved in an Otto-Core repo purely because the author was
+    # on the team list and the repo happened to be cloned). Distinct message so
+    # the log shows WHICH gate fired.
+    local pod_reason
+    if ! pod_reason=$(pod_allowed "$repo"); then
+      echo "  skip #$number ($owner/$repo): domain gate — $pod_reason"
       continue
     fi
 
@@ -662,6 +744,7 @@ OSA
 
   # Phase 1 in bash: only invoke Claude when ≥1 PR survives all filters.
   # filter_prs populates FILTER_SURVIVORS and prints skip reasons to stdout.
+  resolve_pods_csv
   if ! filter_prs; then
     echo "[$(date -Iseconds)] filter failed, skipping tick"
     exit 0
