@@ -31,7 +31,9 @@ CSV
 @test "repo absent from the CSV is refused (fail closed) with a DISTINCT loud reason" {
   # Must be distinguishable from "resolved to a foreign pod": a repo missing
   # from the authoritative map means the map (or the allowlist) needs a human,
-  # not that the repo is out of scope. services-contracts is absent for real.
+  # not that the repo is out of scope. (No real repo the poller meets has this
+  # shape today — services-contracts is PRESENT with an empty Pod cell, see the
+  # test below — so this case uses a synthetic name.)
   run pod_allowed otto-unknown-service
   [ "$status" -eq 1 ]
   [[ "$output" == *"ABSENT from the pods map"* ]]
