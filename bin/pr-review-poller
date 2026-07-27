@@ -379,8 +379,19 @@ filter_prs() {
 
     # 3. Single gh pr view for all remaining filters
     local info
-    if ! info=$(gh pr view "$number" -R "$owner/$repo" --json reviews,commits,headRefName 2>&1); then
+    if ! info=$(gh pr view "$number" -R "$owner/$repo" --json state,reviews,commits,headRefName 2>&1); then
       echo "  skip #$number ($owner/$repo): gh pr view failed ($info)"
+      continue
+    fi
+
+    # 3b. Still-open check. The search result can be stale: a PR merged between
+    # the search and this point wastes a reviewer run on a deleted branch
+    # (observed 2026-07-27: #190 merged mid-tick, worktree fetch died on the
+    # auto-deleted ref). Skip anything that is no longer OPEN.
+    local pr_state
+    pr_state=$(echo "$info" | jq -r '.state // "OPEN"' 2>/dev/null)
+    if [[ "$pr_state" != "OPEN" ]]; then
+      echo "  skip #$number ($owner/$repo): state is $pr_state, not OPEN"
       continue
     fi
 

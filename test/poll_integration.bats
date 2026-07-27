@@ -27,7 +27,7 @@ setup() {
 case "$1 $2" in
   "auth token") echo "gho_stub" ;;
   "search prs") echo '[{"number":265,"title":"t","repository":{"nameWithOwner":"roofstock/otto-leases-service"},"author":{"login":"dmitry-indikeev-rs"}}]' ;;
-  "pr view") echo '{"commits":[{"oid":"dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28","committedDate":"2026-01-01T00:00:00Z"}],"reviews":[],"headRefName":"LRX-9992-branch"}' ;;
+  "pr view") echo '{"state":"'"${GH_STUB_PR_STATE:-OPEN}"'","commits":[{"oid":"dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28","committedDate":"2026-01-01T00:00:00Z"}],"reviews":[],"headRefName":"LRX-9992-branch"}' ;;
   *) echo "unexpected gh call: $*" >&2; exit 1 ;;
 esac
 GH
@@ -90,4 +90,14 @@ CL
   [[ "$output" == *"pr-review-run-all: completed"* ]]
   [[ "$output" == *"launching 1 reviewer(s)"* ]]
   [[ "$output" == *"--reviews-pre-run"* ]]
+}
+
+@test "PR no longer OPEN is skipped before any reviewer is launched" {
+  write_claude_stub writes
+  export GH_STUB_PR_STATE=MERGED
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skip #265 (roofstock/otto-leases-service): state is MERGED, not OPEN"* ]]
+  [[ "$output" == *"no PRs survived filters"* ]]
+  [[ "$output" != *"launching"* ]]
 }
