@@ -22,7 +22,10 @@ REPO_ROOT="${BATS_TEST_DIRNAME}/.."
 # print flag after it. Broad on purpose: `$CLAUDE`, `${PSP_CLAUDE_BIN}`,
 # `/abs/path/claude`, `claude_bin`, `--print` as well as `-p`, and the `=` form.
 _spawn_lines() {
-  grep -rnE '([[:alnum:]_./$${}~-]*claude[[:alnum:]_./$${}~-]*)([^|;&]{0,200})(-p |--print|-p=)' \
+  # -i: `$CLAUDE` is upper-case. A case-sensitive matcher misses every spawn
+  # that names the binary only through an upper-case variable — measured on the
+  # sibling repo, whose `write text "$CLAUDE -p …"` line was invisible without it.
+  grep -rniE '([[:alnum:]_./$${}~-]*claude[[:alnum:]_./$${}~-]*)([^|;&]{0,200})(-p |--print|-p=)' \
     "$REPO_ROOT/bin" "$REPO_ROOT/lib" 2>/dev/null \
     | grep -vE ':[[:space:]]*#'
 }
