@@ -886,6 +886,11 @@ cmd_run() {
   [[ "$POST" == "1" ]] && SLASH="$SLASH --post"
 
   if [[ "$MODE" == "head" ]]; then
+    # headless-lockdown: exempt(attended) — --head opens a VISIBLE iTerm tab the
+    # engineer typed the command for, so blocking permission prompts have a human
+    # to answer them. Marked rather than left invisible: a scanner that cannot see
+    # a site cannot record an exemption for it, and this shape (a binary composed
+    # into an osascript string) is one a naive matcher misses entirely.
     osascript <<OSA
 tell application "iTerm"
   activate
@@ -1085,15 +1090,35 @@ OSA
   # never holds a long foreground call. Model pinned: reviews post PUBLIC PR
   # comments; effort medium is plenty for rule-driven triage.
   SLASH="$SLASH --reviews-pre-run"
-  CLAUDE_FLAGS=(--model claude-opus-5 --effort medium)
-  # VERIFY: no MCP servers at all — harness-enforced, so mcp github/slack write
-  # tools do not exist in the triage session (layer 1 of the write block).
-  if [[ "$VERIFY" == "1" ]]; then
-    CLAUDE_FLAGS+=(--strict-mcp-config --mcp-config '{"mcpServers":{}}')
+  # The triage session reads the reviewers' findings logs, which quote PR text
+  # VERBATIM — same untrusted corpus as the reviewers themselves, writable by
+  # every org member plus Copilot and dependabot. Until 2026-08-01 the MCP strip
+  # fired only under --verify, so the ordinary hourly path inherited
+  # ~/.claude/settings.json: defaultMode "auto", an EMPTY deny list, and 80 allow
+  # entries including Bash(python3:*), Write(*), mcp__postgres__execute_sql
+  # (PROD) and the bare mcp__dockwright__* wildcard, which holds kill_worker and
+  # become_manager_with_takeover. Measured on CLI 2.1.220: an unflagged child
+  # holds 63 tools and 3 MCP servers; with --setting-sources "" it holds 29 and
+  # none.
+  #
+  # Everything carrying authority now lives in ONE reviewed file — the
+  # `pr-review-triage` lane in ~/.claude/dockwright/headless-lanes.toml. This
+  # script passes a lane name and DATA and cannot pass a capability flag at all,
+  # so no edit here can widen the session. The lane declares zero MCP servers on
+  # EVERY path, which is what --verify used to buy only for itself.
+  local LAUNCHER="${PR_REVIEW_POLLER_LAUNCHER:-$HOME/.claude/scripts/headless_spawn.py}"
+  if [[ ! -f "$LAUNCHER" ]]; then
+    # Fail LOUD, never silently ungated: the old fallback WAS the vulnerability.
+    echo "[$(date -Iseconds)] poll FAILED — headless_spawn.py missing at $LAUNCHER; run dockwright setup.sh"
+    cleanup_dispatched "${FILTER_SURVIVORS[@]}"
+    exit 1
   fi
-  echo "[$(date -Iseconds)] invoking claude (${CLAUDE_FLAGS[*]}) for triage of ${#_pr_urls[@]} PR(s): $SLASH ${_pr_urls[*]}"
+  echo "[$(date -Iseconds)] invoking claude (lane pr-review-triage) for triage of ${#_pr_urls[@]} PR(s): $SLASH ${_pr_urls[*]}"
   local rc=0
-  "$CLAUDE" "${CLAUDE_FLAGS[@]}" -p "$SLASH ${_pr_urls[*]}" || rc=$?
+  # headless-lockdown: wrapper — argv built from the `pr-review-triage` lane
+  "$LAUNCHER" spawn --lane pr-review-triage \
+    --arg "worktree=$HOME/worktrees" \
+    --arg "ARGUMENTS=$SLASH ${_pr_urls[*]}" || rc=$?
 
   # Assert BEFORE cleanup (it reads result files), clean up BEFORE any exit
   # (spec-review F2: cleanup sequenced after exit 1 is dead code on exactly the
