@@ -44,17 +44,13 @@ filter_as() {
   filter_prs > "$FILTER_LOG"
 }
 
-# The roster as the SHIPPED CODE holds it, comments stripped so a login quoted
-# in prose can never stand in for one in the executed array.
+# The roster as the RUNNING CODE holds it. setup() sourced the script, so this
+# is the array filter_prs itself loops — not a regex over the source. An earlier
+# version parsed the file, and any behaviour-preserving reformat (a wrapped
+# line, a `team+=` append, quoted elements) silently shrank the covered set
+# while every test stayed green.
 roster_from_script() {
-  grep -vE '^[[:space:]]*#' "$SCRIPT_UNDER_TEST" \
-    | sed -n 's/^[[:space:]]*local team=(\([^)]*\)).*$/\1/p'
-}
-
-@test "the roster line is parseable and non-empty (guards the two tests below)" {
-  local roster; roster=$(roster_from_script)
-  [ -n "$roster" ]
-  [ "$(roster_from_script | wc -l | tr -d ' ')" -eq 1 ]
+  printf '%s\n' "${TEAM[@]}"
 }
 
 @test "rustem-zhunussov-rs is on the team, so his PR reaches the review queue" {
@@ -68,16 +64,25 @@ roster_from_script() {
 }
 
 @test "every login in the shipped roster is admitted" {
-  local login count=0
+  local login checked=0 expected=0
   for login in $(roster_from_script); do
+    # `gh search prs --review-requested=@me` cannot return a PR this login
+    # authored, so admitting our own login is an input the real source never
+    # emits — and asserting it would false-red a later "skip my own PRs" guard.
+    [ "$login" = "$WORK_GH_USER" ] && continue
+    expected=$((expected + 1))
     filter_as "$login"
     if [ "${#FILTER_SURVIVORS[@]}" -ne 1 ]; then
       echo "roster member '$login' was NOT admitted: $(cat "$FILTER_LOG")"
       return 1
     fi
-    count=$((count + 1))
+    checked=$((checked + 1))
   done
-  [ "$count" -ge 5 ]
+  # The loop walks the live TEAM array, so coverage tracks the roster by
+  # construction — no floor to go stale. These two only refuse a VACUOUS pass:
+  # an empty or self-only TEAM would otherwise satisfy the loop by never running.
+  [ "$expected" -eq "$(( ${#TEAM[@]} - 1 ))" ]
+  [ "$checked" -ge 4 ]
 }
 
 @test "an author outside the roster is skipped, with the team reason named" {

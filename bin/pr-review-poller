@@ -616,6 +616,16 @@ repo_owned() {
   return 1
 }
 
+# Mirrors the team-members list in ~/.claude/skills/kezoo-review-prs/SKILL.md.
+# Keep in sync when the skill's team changes.
+#
+# Top-level rather than `local` inside filter_prs so the tests can read the
+# ACTUAL runtime array by sourcing this file. The previous shape forced them to
+# regex the source, and any behaviour-preserving reformat (wrapping the line,
+# appending with `team+=`, quoting the elements) silently shrank what they
+# covered while the suite stayed green.
+TEAM=(aleksandr-beliakov-rs dmitry-indikeev-rs alejandro-gomez-rs alexander-grigorov-rs vadim-kostenko-rs rustem-zhunussov-rs)
+
 # Phase 1 discovery + filtering. Same logic as ~/.claude/skills/kezoo-review-prs/SKILL.md
 # Phase 1, pulled into bash so empty/all-skipped ticks don't burn Claude tokens.
 # Writes surviving PR URLs into the FILTER_SURVIVORS array (caller reads it).
@@ -632,10 +642,6 @@ filter_prs() {
     return 2
   }
 
-  # Mirrors the team-members list in ~/.claude/skills/kezoo-review-prs/SKILL.md.
-  # Keep in sync when the skill's team changes.
-  local team=(aleksandr-beliakov-rs dmitry-indikeev-rs alejandro-gomez-rs alexander-grigorov-rs vadim-kostenko-rs rustem-zhunussov-rs)
-
   local raw
   if ! raw=$(gh search prs --review-requested=@me --state=open --draft=false --limit=50 \
       --json number,title,repository,author 2>&1); then
@@ -651,7 +657,7 @@ filter_prs() {
 
     # 1. Team-author filter
     local in_team=0
-    for t in "${team[@]}"; do
+    for t in "${TEAM[@]}"; do
       [[ "$t" == "$author" ]] && { in_team=1; break; }
     done
     if [[ "$in_team" == "0" ]]; then
