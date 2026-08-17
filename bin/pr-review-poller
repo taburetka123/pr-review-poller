@@ -634,7 +634,12 @@ filter_prs() {
 
   # Mirrors the team-members list in ~/.claude/skills/kezoo-review-prs/SKILL.md.
   # Keep in sync when the skill's team changes.
-  local team=(aleksandr-beliakov-rs dmitry-indikeev-rs alejandro-gomez-rs alexander-grigorov-rs vadim-kostenko-rs)
+  #
+  # Deliberately `local`, not a top-level array: load_config sources the
+  # user-writable config.env, so a script-scope roster would be an
+  # authorization allowlist that a later `source` could silently replace.
+  # Re-declaring it per call makes that override structurally impossible.
+  local team=(aleksandr-beliakov-rs dmitry-indikeev-rs alejandro-gomez-rs alexander-grigorov-rs vadim-kostenko-rs rustem-zhunussov-rs)
 
   local raw
   if ! raw=$(gh search prs --review-requested=@me --state=open --draft=false --limit=50 \
