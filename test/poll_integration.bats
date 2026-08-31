@@ -16,6 +16,9 @@ setup() {
   export PR_REVIEW_RUN_ALL="$BATS_TEST_TMPDIR/stub-run-all"
   export PR_REVIEW_WORKTREE_SCRIPT="$BATS_TEST_TMPDIR/stub-worktree"
   export PR_REVIEW_POLLER_CLAUDE="$BATS_TEST_TMPDIR/stub-claude"
+  # The triage session is spawned through the dockwright headless wrapper now,
+  # not by invoking claude directly, so the stub stands in for the LAUNCHER.
+  export PR_REVIEW_POLLER_LAUNCHER="$BATS_TEST_TMPDIR/stub-claude"
   mkdir -p "$PR_REVIEW_POLLER_STATE_DIR"
   # prune gate: stamp fresh so prune_findings skips (no gh calls from prune)
   date +%s > "$PR_REVIEW_POLLER_STATE_DIR/last-prune.epoch"
@@ -112,16 +115,27 @@ assert_banner_has_no_overclaim() {
   return 0
 }
 
-# Every recorded claude call must carry exactly ONE --model, valued as the
-# roster pin. Presence is not enough: claude's CLI takes the LAST --model
-# (spiked empirically by the Tier-2 delta), so a later duplicate silently
-# shadows the pin (finding E); and a new unpinned call site must fail, not
-# hide behind the last-written record (finding F).
+# Every recorded spawn must name exactly ONE lane, and the pinned one.
+#
+# The --model / --strict-mcp-config assertions this replaced no longer have an
+# argv to read: since harden-headless the poller spawns through
+# headless_spawn.py, which builds the child's argv from the `pr-review-triage`
+# lane in ~/.claude/dockwright/headless-lanes.toml. That is deliberate — a call
+# site that could pass --model could also pass --allow 'Bash(python3:*)'.
+#
+# The pin is NOT dropped, it moved, and every link in the chain is asserted:
+#   this test          -> the poller names exactly one lane, and it is the right one
+#   headless-lanes.toml-> that lane's model, tools, grants and MCP set (reviewed diff)
+#   dockwright's
+#   test_headless_spawn -> the wrapper builds a CONTAINED argv from a lane, and
+#                          refuses any caller-supplied capability flag (74 tests)
+# A duplicate/later lane argument still shadows the first, so the "exactly one"
+# shape is kept for the same reason the --model version had it.
 assert_every_call_pinned() {
   awk '
-    /^--CALL--$/ { calls++; if (models != 1 || value != "claude-opus-5") bad=1; models=0; value=""; next }
+    /^--CALL--$/ { calls++; if (lanes != 1 || value != "pr-review-triage") bad=1; lanes=0; value=""; next }
     prev { value=$0; prev=0 }
-    $0 == "--model" { models++; prev=1 }
+    $0 == "--lane" { lanes++; prev=1 }
     END { exit (calls < 1 || bad) ? 1 : 0 }
   ' "$BATS_TEST_TMPDIR/claude-argv"
 }
@@ -256,7 +270,13 @@ CSV
   # is the one sanctioned use of "airtight", so strip it before matching.
   assert_banner_has_no_overclaim "$output"
   [[ "$output" == *"poll done"* ]]
-  grep -q -- "--strict-mcp-config" "$BATS_TEST_TMPDIR/claude-argv"
+  # The MCP strip is now UNCONDITIONAL, not a --verify-only flag: the
+  # `pr-review-triage` lane declares zero MCP servers on every path, so the
+  # ordinary hourly tick gets what only --verify used to buy. Asserted here as
+  # "the spawn goes through the lane"; the lane's own mcp_servers = [] is a
+  # reviewed line in headless-lanes.toml, and the wrapper's refusal to let a
+  # caller re-add one is covered by dockwright's test_headless_spawn.py.
+  grep -q -- "pr-review-triage" "$BATS_TEST_TMPDIR/claude-argv"
   assert_every_call_pinned
   # the claude session inherited the guard PATH: gh resolved AT CLAUDE RUNTIME
   # to the guard dir's gh (the head of its PATH), not the test's stub — the
