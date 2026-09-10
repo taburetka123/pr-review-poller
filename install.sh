@@ -3,8 +3,8 @@
 # Idempotent: re-run to change interval or commit-age.
 set -euo pipefail
 
-MIN_COMMIT_AGE="10m"
-REVIEW_FREQUENCY="2h"
+MIN_COMMIT_AGE=""
+REVIEW_FREQUENCY=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -15,12 +15,12 @@ while [[ $# -gt 0 ]]; do
 Usage: ./install.sh [--min-commit-age DURATION] [--frequency DURATION]
 
   --min-commit-age DUR   Minimum age of the newest commit before auto-review
-                         fires. 10m, 1h, etc. 0 disables. Default 10m.
+                         fires. 10m, 1h, etc. 0 disables. Default 10m for a new config.env; an existing file keeps its value unless this flag is given.
 
   --frequency DUR        Minimum gap between review runs. The launchd job
                          fires hourly; ticks that arrive sooner than DUR
                          since the last run are skipped. 1h, 2h, etc.
-                         Default 2h.
+                         Default 2h for a new config.env; an existing file keeps its value unless this flag is given.
 
 The launchd job fires every hour at minute 0 (StartCalendarInterval). If the
 Mac was asleep, one coalesced tick fires on wake — the frequency gate decides
@@ -42,10 +42,22 @@ mkdir -p "$(dirname "$BIN_DST")" "$CONFIG_DIR" "$HOME/worktrees" \
 
 ln -sfn "$REPO_DIR/bin/pr-review-poller" "$BIN_DST"
 
-cat > "$CONFIG_DIR/config.env" <<EOF
-MIN_COMMIT_AGE="$MIN_COMMIT_AGE"
-REVIEW_FREQUENCY="$REVIEW_FREQUENCY"
-EOF
+CONFIG="$CONFIG_DIR/config.env"
+set_key() {
+  local tmp="$CONFIG.tmp.$$"
+  if grep -q "^$1=" "$CONFIG"; then
+    awk -v k="$1" -v v="$2" 'index($0, k "=") == 1 { print k "=\"" v "\""; next } { print }' "$CONFIG" > "$tmp"
+    mv "$tmp" "$CONFIG"
+  else
+    printf '%s="%s"\n' "$1" "$2" >> "$CONFIG"
+  fi
+}
+if [[ ! -f "$CONFIG" ]]; then
+  printf 'MIN_COMMIT_AGE="%s"\nREVIEW_FREQUENCY="%s"\n' "${MIN_COMMIT_AGE:-10m}" "${REVIEW_FREQUENCY:-2h}" > "$CONFIG"
+else
+  if [[ -n "$MIN_COMMIT_AGE" ]]; then set_key MIN_COMMIT_AGE "$MIN_COMMIT_AGE"; fi
+  if [[ -n "$REVIEW_FREQUENCY" ]]; then set_key REVIEW_FREQUENCY "$REVIEW_FREQUENCY"; fi
+fi
 
 cp "$REPO_DIR/launchd/com.kezoo.pr-review-poller.plist.tmpl" "$PLIST_DST"
 
@@ -61,8 +73,8 @@ fi
 
 echo "Installed."
 echo "  schedule:        hourly at minute 0 (StartCalendarInterval)"
-echo "  frequency gate:  $REVIEW_FREQUENCY"
-echo "  min-commit-age:  $MIN_COMMIT_AGE"
+echo "  frequency gate:  $(grep '^REVIEW_FREQUENCY=' "$CONFIG" || echo 'default 2h')"
+echo "  min-commit-age:  $(grep '^MIN_COMMIT_AGE=' "$CONFIG" || echo 'default 40m')"
 echo "  bin:             $BIN_DST"
 echo "  plist:           $PLIST_DST"
 echo "  config:          $CONFIG_DIR/config.env"

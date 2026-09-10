@@ -286,3 +286,39 @@ CSV
   run "$SCRIPT_UNDER_TEST" run --verify --head
   [ "$status" -eq 2 ]
 }
+
+@test "a non-executable PR_REVIEW_POLLER_CLAUDE falls back to the default and says so" {
+  write_claude_stub writes
+  export PR_REVIEW_POLLER_CLAUDE_DEFAULT="$PR_REVIEW_POLLER_CLAUDE"
+  export PR_REVIEW_POLLER_CLAUDE="$BATS_TEST_TMPDIR/no-such-claude"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PR_REVIEW_POLLER_CLAUDE=$BATS_TEST_TMPDIR/no-such-claude is not an executable file; falling back to $PR_REVIEW_POLLER_CLAUDE_DEFAULT"* ]]
+  [ -s "$BATS_TEST_TMPDIR/claude-argv" ]
+}
+
+@test "a directory is not accepted as PR_REVIEW_POLLER_CLAUDE" {
+  write_claude_stub writes
+  export PR_REVIEW_POLLER_CLAUDE_DEFAULT="$PR_REVIEW_POLLER_CLAUDE"
+  export PR_REVIEW_POLLER_CLAUDE="$BATS_TEST_TMPDIR"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"is not an executable file; falling back to"* ]]
+  [ -s "$BATS_TEST_TMPDIR/claude-argv" ]
+}
+
+@test "under bats a broken PR_REVIEW_POLLER_CLAUDE with no default override refuses instead of running the real claude" {
+  export PR_REVIEW_POLLER_CLAUDE="$BATS_TEST_TMPDIR/no-such-claude"
+  unset PR_REVIEW_POLLER_CLAUDE_DEFAULT
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"refusing the built-in claude fallback under test"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/claude-argv" ]
+}
+
+@test "under bats with no claude override at all the poller refuses instead of running the real claude" {
+  unset PR_REVIEW_POLLER_CLAUDE PR_REVIEW_POLLER_CLAUDE_DEFAULT
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"refusing the built-in claude fallback under test"* ]]
+}
