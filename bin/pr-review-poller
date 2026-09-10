@@ -14,7 +14,8 @@ LEDGER_FILE="$STATE_DIR/held.json"
 STDOUT_LOG="$HOME/worktrees/.pr-review-poller-stdout.log"
 STDERR_LOG="$HOME/worktrees/.pr-review-poller-stderr.log"
 FINDINGS_DIR="${PR_REVIEW_FINDINGS_ROOT:-$HOME/worktrees/.pr-review-findings}"
-CLAUDE_DEFAULT="${PR_REVIEW_POLLER_CLAUDE_DEFAULT:-/Users/kezoo/.local/bin/claude}"
+REAL_CLAUDE="/Users/kezoo/.local/bin/claude"
+CLAUDE_DEFAULT="${PR_REVIEW_POLLER_CLAUDE_DEFAULT:-$REAL_CLAUDE}"
 CLAUDE="${PR_REVIEW_POLLER_CLAUDE:-$CLAUDE_DEFAULT}"
 RUN_ALL_SCRIPT="${PR_REVIEW_RUN_ALL:-$HOME/.claude/scripts/pr-review-run-all}"
 WORKTREE_SCRIPT="${PR_REVIEW_WORKTREE_SCRIPT:-$HOME/.claude/scripts/pr-review-worktree}"
@@ -38,21 +39,18 @@ load_config() {
 }
 
 refuse_real_claude_under_test() {
-  echo "[$(date -Iseconds)] refusing the built-in claude fallback under test: $1; set PR_REVIEW_POLLER_CLAUDE_DEFAULT to a stub" >&2
+  echo "[$(date -Iseconds)] refusing the real claude under test: $CLAUDE is $REAL_CLAUDE; point PR_REVIEW_POLLER_CLAUDE or PR_REVIEW_POLLER_CLAUDE_DEFAULT at a stub" >&2
   exit 3
 }
 
 resolve_claude() {
-  local under_test=0
-  [[ -n "${BATS_TEST_TMPDIR:-}" && -z "${PR_REVIEW_POLLER_CLAUDE_DEFAULT:-}" ]] && under_test=1
-  if [[ -z "${PR_REVIEW_POLLER_CLAUDE:-}" ]]; then
-    [[ "$under_test" == 1 ]] && refuse_real_claude_under_test "no PR_REVIEW_POLLER_CLAUDE is set"
-    return 0
+  if [[ -n "${PR_REVIEW_POLLER_CLAUDE:-}" ]] && ! [[ -f "$CLAUDE" && -x "$CLAUDE" ]]; then
+    echo "[$(date -Iseconds)] PR_REVIEW_POLLER_CLAUDE=$CLAUDE is not an executable file; falling back to $CLAUDE_DEFAULT" >&2
+    CLAUDE="$CLAUDE_DEFAULT"
   fi
-  [[ -f "$CLAUDE" && -x "$CLAUDE" ]] && return 0
-  [[ "$under_test" == 1 ]] && refuse_real_claude_under_test "PR_REVIEW_POLLER_CLAUDE=$CLAUDE is not an executable file"
-  echo "[$(date -Iseconds)] PR_REVIEW_POLLER_CLAUDE=$CLAUDE is not an executable file; falling back to $CLAUDE_DEFAULT" >&2
-  CLAUDE="$CLAUDE_DEFAULT"
+  if [[ -n "${BATS_TEST_TMPDIR:-}" ]] && [[ "$CLAUDE" == "$REAL_CLAUDE" || "$CLAUDE" -ef "$REAL_CLAUDE" ]]; then
+    refuse_real_claude_under_test
+  fi
 }
 
 # Pretty-print whichever scheduling key the plist uses. StartCalendarInterval

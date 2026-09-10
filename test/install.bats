@@ -47,3 +47,16 @@ seed_config() {
   grep -qx 'MIN_COMMIT_AGE="10m"' "$CONFIG"
   grep -qx 'REVIEW_FREQUENCY="2h"' "$CONFIG"
 }
+
+@test "install rejects an empty flag value and leaves config.env untouched" {
+  seed_config
+  cp "$CONFIG" "$BATS_TEST_TMPDIR/before"
+  run "$INSTALL" --min-commit-age ""
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--min-commit-age needs a non-empty value"* ]]
+  cmp "$CONFIG" "$BATS_TEST_TMPDIR/before"
+  run "$INSTALL" --frequency
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--frequency needs a non-empty value"* ]]
+  cmp "$CONFIG" "$BATS_TEST_TMPDIR/before"
+}

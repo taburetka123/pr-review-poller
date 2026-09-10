@@ -312,7 +312,7 @@ CSV
   unset PR_REVIEW_POLLER_CLAUDE_DEFAULT
   run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
   [ "$status" -eq 3 ]
-  [[ "$output" == *"refusing the built-in claude fallback under test"* ]]
+  [[ "$output" == *"refusing the real claude under test"* ]]
   [ ! -e "$BATS_TEST_TMPDIR/claude-argv" ]
 }
 
@@ -320,5 +320,22 @@ CSV
   unset PR_REVIEW_POLLER_CLAUDE PR_REVIEW_POLLER_CLAUDE_DEFAULT
   run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
   [ "$status" -eq 3 ]
-  [[ "$output" == *"refusing the built-in claude fallback under test"* ]]
+  [[ "$output" == *"refusing the real claude under test"* ]]
+}
+
+@test "under bats a PR_REVIEW_POLLER_CLAUDE that names the real claude is refused" {
+  unset PR_REVIEW_POLLER_CLAUDE_DEFAULT
+  export PR_REVIEW_POLLER_CLAUDE=/Users/kezoo/.local/bin/claude
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"refusing the real claude under test"* ]]
+}
+
+@test "under bats a PR_REVIEW_POLLER_CLAUDE that names the real claude's resolved target is refused" {
+  [ -e /Users/kezoo/.local/bin/claude ] || skip "no real claude on this machine"
+  unset PR_REVIEW_POLLER_CLAUDE_DEFAULT
+  export PR_REVIEW_POLLER_CLAUDE="$(/bin/realpath /Users/kezoo/.local/bin/claude)"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"refusing the real claude under test"* ]]
 }

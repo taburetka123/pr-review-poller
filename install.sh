@@ -8,19 +8,25 @@ REVIEW_FREQUENCY=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --min-commit-age) MIN_COMMIT_AGE="$2"; shift 2 ;;
-    --frequency)      REVIEW_FREQUENCY="$2"; shift 2 ;;
+    --min-commit-age|--frequency)
+      if [[ -z "${2:-}" ]]; then echo "$1 needs a non-empty value" >&2; exit 2; fi
+      if [[ "$1" == --min-commit-age ]]; then MIN_COMMIT_AGE="$2"; else REVIEW_FREQUENCY="$2"; fi
+      shift 2
+      ;;
     -h|--help)
       cat <<EOF
 Usage: ./install.sh [--min-commit-age DURATION] [--frequency DURATION]
 
   --min-commit-age DUR   Minimum age of the newest commit before auto-review
-                         fires. 10m, 1h, etc. 0 disables. Default 10m for a new config.env; an existing file keeps its value unless this flag is given.
+                         fires. 10m, 1h, etc. 0 disables. Default 10m for a
+                         new config.env; an existing file keeps its value
+                         unless this flag is given.
 
   --frequency DUR        Minimum gap between review runs. The launchd job
                          fires hourly; ticks that arrive sooner than DUR
                          since the last run are skipped. 1h, 2h, etc.
-                         Default 2h for a new config.env; an existing file keeps its value unless this flag is given.
+                         Default 2h for a new config.env; an existing file
+                         keeps its value unless this flag is given.
 
 The launchd job fires every hour at minute 0 (StartCalendarInterval). If the
 Mac was asleep, one coalesced tick fires on wake — the frequency gate decides
