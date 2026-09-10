@@ -14,7 +14,9 @@ LEDGER_FILE="$STATE_DIR/held.json"
 STDOUT_LOG="$HOME/worktrees/.pr-review-poller-stdout.log"
 STDERR_LOG="$HOME/worktrees/.pr-review-poller-stderr.log"
 FINDINGS_DIR="${PR_REVIEW_FINDINGS_ROOT:-$HOME/worktrees/.pr-review-findings}"
-CLAUDE="${PR_REVIEW_POLLER_CLAUDE:-/Users/kezoo/.local/bin/claude}"
+REAL_CLAUDE="/Users/kezoo/.local/bin/claude"
+CLAUDE_DEFAULT="${PR_REVIEW_POLLER_CLAUDE_DEFAULT:-$REAL_CLAUDE}"
+CLAUDE="${PR_REVIEW_POLLER_CLAUDE:-$CLAUDE_DEFAULT}"
 RUN_ALL_SCRIPT="${PR_REVIEW_RUN_ALL:-$HOME/.claude/scripts/pr-review-run-all}"
 WORKTREE_SCRIPT="${PR_REVIEW_WORKTREE_SCRIPT:-$HOME/.claude/scripts/pr-review-worktree}"
 
@@ -34,6 +36,21 @@ load_config() {
   # (no `<repo>-co` team exists for it, yet it carries real review requests).
   # |-separated; config.env overrides it with a one-line edit.
   ALLOWED_EXTRA_REPOS="${ALLOWED_EXTRA_REPOS:-services-contracts}"
+}
+
+refuse_real_claude_under_test() {
+  echo "[$(date -Iseconds)] refusing the real claude under test: $CLAUDE is $REAL_CLAUDE; point PR_REVIEW_POLLER_CLAUDE or PR_REVIEW_POLLER_CLAUDE_DEFAULT at a stub" >&2
+  exit 3
+}
+
+resolve_claude() {
+  if [[ -n "${PR_REVIEW_POLLER_CLAUDE:-}" ]] && ! [[ -f "$CLAUDE" && -x "$CLAUDE" ]]; then
+    echo "[$(date -Iseconds)] PR_REVIEW_POLLER_CLAUDE=$CLAUDE is not an executable file; falling back to $CLAUDE_DEFAULT" >&2
+    CLAUDE="$CLAUDE_DEFAULT"
+  fi
+  if [[ -n "${BATS_TEST_TMPDIR:-}" ]] && [[ "$CLAUDE" == "$REAL_CLAUDE" || "$CLAUDE" -ef "$REAL_CLAUDE" ]]; then
+    refuse_real_claude_under_test
+  fi
 }
 
 # Pretty-print whichever scheduling key the plist uses. StartCalendarInterval
@@ -891,6 +908,7 @@ cmd_run() {
   [[ "$POST" == "1" ]] && SLASH="$SLASH --post"
 
   if [[ "$MODE" == "head" ]]; then
+    resolve_claude
     osascript <<OSA
 tell application "iTerm"
   activate
@@ -1097,6 +1115,7 @@ OSA
     CLAUDE_FLAGS+=(--strict-mcp-config --mcp-config '{"mcpServers":{}}')
   fi
   echo "[$(date -Iseconds)] invoking claude (${CLAUDE_FLAGS[*]}) for triage of ${#_pr_urls[@]} PR(s): $SLASH ${_pr_urls[*]}"
+  resolve_claude
   local rc=0
   "$CLAUDE" "${CLAUDE_FLAGS[@]}" -p "$SLASH ${_pr_urls[*]}" || rc=$?
 
