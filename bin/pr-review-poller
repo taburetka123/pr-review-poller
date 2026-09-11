@@ -658,14 +658,17 @@ filter_prs() {
   # Re-declaring it per call makes that override structurally impossible.
   local team=(aleksandr-beliakov-rs dmitry-indikeev-rs alejandro-gomez-rs alexander-grigorov-rs vadim-kostenko-rs rustem-zhunussov-rs)
 
-  local raw
-  if ! raw=$(gh search prs --review-requested=@me --state=open --draft=false --limit=50 \
+  local raw search_limit=50
+  if ! raw=$(gh search prs --review-requested=@me --state=open --draft=false --limit="$search_limit" \
       --json number,title,repository,author 2>&1); then
     echo "gh search failed: $raw" >&2
     return 1
   fi
   if [[ -z "$raw" || "$raw" == "[]" ]]; then
     return 0
+  fi
+  if [[ "$(echo "$raw" | jq 'length')" -ge "$search_limit" ]]; then
+    echo "  WARN: gh search returned $search_limit PRs, the --limit cap; PRs past it are not considered this tick"
   fi
 
   while IFS=$'\t' read -r owner repo number author; do
@@ -704,9 +707,8 @@ filter_prs() {
       continue
     fi
 
-    # 3. Single gh pr view for all remaining filters
     local info
-    if ! info=$(gh pr view "$number" -R "$owner/$repo" --json state,reviews,commits,headRefName 2>&1); then
+    if ! info=$(gh pr view "$number" -R "$owner/$repo" --json state,reviews,headRefOid,headRefName 2>&1); then
       echo "  skip #$number ($owner/$repo): gh pr view failed ($info)"
       continue
     fi
@@ -723,12 +725,12 @@ filter_prs() {
     fi
 
     local head_oid committed_at
-    head_oid=$(echo "$info" | jq -r '.commits[-1].oid' 2>/dev/null)
-    committed_at=$(echo "$info" | jq -r '.commits[-1].committedDate' 2>/dev/null)
-    if [[ -z "$head_oid" || "$head_oid" == "null" ]]; then
+    head_oid=$(echo "$info" | jq -r '.headRefOid // empty' 2>/dev/null)
+    if [[ -z "$head_oid" ]]; then
       echo "  skip #$number ($owner/$repo): could not parse HEAD commit"
       continue
     fi
+    committed_at=$(gh api "repos/$owner/$repo/commits/$head_oid" --jq '.commit.committer.date' 2>/dev/null) || committed_at=""
 
     # 4. Commit-age gate
     local committed_epoch age
@@ -736,7 +738,7 @@ filter_prs() {
     # and parses the timestamp in $TZ, so without it the age is off by the
     # local offset (7h in +07) and every commit looks artificially old — the
     # gate never trips and too-young commits leak through to the auto-claim.
-    committed_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$committed_at" +%s 2>/dev/null)
+    committed_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$committed_at" +%s 2>/dev/null) || committed_epoch=""
     if [[ -z "$committed_epoch" ]]; then
       echo "  skip #$number ($owner/$repo): could not parse committedDate $committed_at"
       continue

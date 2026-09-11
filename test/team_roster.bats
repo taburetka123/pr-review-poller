@@ -26,7 +26,10 @@ case "$1 $2" in
     printf '[{"number":265,"title":"t","repository":{"nameWithOwner":"roofstock/otto-leases-service"},"author":{"login":"%s"}}]\n' "${GH_STUB_AUTHOR:?stub author not set}"
     ;;
   "pr view")
-    echo '{"state":"OPEN","commits":[{"oid":"dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28","committedDate":"2026-01-01T00:00:00Z"}],"reviews":[],"headRefName":"LRX-9992-branch"}'
+    echo '{"state":"OPEN","headRefOid":"dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28","reviews":[],"headRefName":"LRX-9992-branch"}'
+    ;;
+  "api repos/roofstock/otto-leases-service/commits/dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28")
+    echo "2026-01-01T00:00:00Z"
     ;;
   *) echo "unexpected gh call: $*" >&2; exit 1 ;;
 esac
