@@ -43,6 +43,10 @@ GH
   PATH="$BATS_TEST_TMPDIR/bin:$PATH"
 }
 
+teardown() {
+  chmod -R u+w "$BATS_TEST_TMPDIR" 2>/dev/null || true
+}
+
 filter() {
   FILTER_LOG="$BATS_TEST_TMPDIR/filter.log"
   filter_prs > "$FILTER_LOG"
@@ -93,4 +97,13 @@ filter() {
   export GH_STUB_SEARCH_COUNT=49
   filter
   ! grep -q "WARN: gh search returned" "$FILTER_LOG" || false
+}
+
+@test "a ledger that cannot be written warns and never aborts the pin" {
+  mkdir -p "$BATS_TEST_TMPDIR/ro"
+  LEDGER_FILE="$BATS_TEST_TMPDIR/ro/held.json"
+  echo '{"roofstock/otto-leases-service#265":{"commit":"x","reason":"1 major finding at conf 4"}}' > "$LEDGER_FILE"
+  chmod a-w "$BATS_TEST_TMPDIR/ro"
+  pin_held_to_admitted_head $'roofstock\totto-leases-service\t265\t'"$HEAD_OID"$'\tLRX-9992-branch\t\turl' > "$BATS_TEST_TMPDIR/pin.log" 2>&1
+  grep -q "WARN: could not pin held entry roofstock/otto-leases-service#265" "$BATS_TEST_TMPDIR/pin.log"
 }

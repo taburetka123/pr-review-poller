@@ -884,7 +884,10 @@ pin_held_to_admitted_head() {
     reason=$(jq -r --arg key "$key" '.[$key].reason // empty' "$LEDGER_FILE" 2>/dev/null) || reason=""
     [[ -z "$reason" || "$reason" == \[in-flight\]* ]] && continue
     tmp=$(mktemp)
-    jq --arg key "$key" --arg commit "$_head" '.[$key].commit = $commit' "$LEDGER_FILE" > "$tmp" && mv "$tmp" "$LEDGER_FILE"
+    if ! { jq --arg key "$key" --arg commit "$_head" '.[$key].commit = $commit' "$LEDGER_FILE" > "$tmp" && mv "$tmp" "$LEDGER_FILE"; }; then
+      rm -f "$tmp"
+      echo "  WARN: could not pin held entry $key to ${_head:0:7}"
+    fi
   done
   return 0
 }
