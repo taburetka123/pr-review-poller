@@ -58,7 +58,7 @@ filter() {
 @test "a review at the 100th commit does not hide new commits past it" {
   export GH_STUB_REVIEWS="[{\"author\":{\"login\":\"aleksandr-beliakov-rs\"},\"commit\":{\"oid\":\"$HUNDREDTH_OID\"},\"state\":\"COMMENTED\",\"submittedAt\":\"2026-01-01T00:00:00Z\"}]"
   filter
-  ! grep -q "already reviewed" "$FILTER_LOG"
+  ! grep -q "already reviewed" "$FILTER_LOG" || false
   [ "${#FILTER_SURVIVORS[@]}" -eq 1 ]
 }
 
@@ -79,7 +79,7 @@ filter() {
 @test "a head commit whose date cannot be read is skipped, never queued" {
   export GH_STUB_API_FAILS=1
   filter
-  grep -q "could not parse committedDate" "$FILTER_LOG"
+  grep -q "head commit lookup failed" "$FILTER_LOG"
   [ "${#FILTER_SURVIVORS[@]}" -eq 0 ]
 }
 
@@ -92,5 +92,5 @@ filter() {
 @test "a search under the cap logs no cap warning" {
   export GH_STUB_SEARCH_COUNT=49
   filter
-  ! grep -q "WARN: gh search returned" "$FILTER_LOG"
+  ! grep -q "WARN: gh search returned" "$FILTER_LOG" || false
 }

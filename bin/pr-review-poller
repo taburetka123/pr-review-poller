@@ -730,7 +730,10 @@ filter_prs() {
       echo "  skip #$number ($owner/$repo): could not parse HEAD commit"
       continue
     fi
-    committed_at=$(gh api "repos/$owner/$repo/commits/$head_oid" --jq '.commit.committer.date' 2>/dev/null) || committed_at=""
+    if ! committed_at=$(gh api "repos/$owner/$repo/commits/$head_oid" --jq '.commit.committer.date' 2>&1); then
+      echo "  skip #$number ($owner/$repo): head commit lookup failed ($committed_at)"
+      continue
+    fi
 
     # 4. Commit-age gate
     local committed_epoch age
