@@ -10,7 +10,7 @@ Three possible actions:
 
 - **POST** — leave each finding as a **standalone inline PR comment** (not wrapped in a review submission) so the timeline gets per-comment "commented on" entries instead of a "reviewed changes" block. Every body is footer-tagged `*Automated review*` so humans can tell the source. Only used when a `blocker` or `major` finding clears the author's post threshold (see trust matrix in the `/kezoo-review-prs` skill).
 - **HOLD** — don't touch GitHub. Record the PR in a local ledger (`~/.local/state/pr-review-poller/held.json`) and DM yourself on Slack with the full review so you can decide. The PR is skipped on subsequent polls (until new commits) so you aren't spammed.
-- **APPROVE** — submit an `APPROVE` review with an empty body, pinned to the reviewed commit. It happens only when every approve condition in the skill holds; anything else is a HOLD.
+- **APPROVE** — submit an `APPROVE` review with an empty body, pinned to the reviewed commit. It happens only when every approve condition in the skill holds.
 
 Trust is per-author and expressed as the **maximum PR complexity (1–5) we'll let the bot act on without a human**. The reviewing subagent rates each PR's complexity 1–5; if `complexity > author trust`, the action is HOLD — no findings are examined for the auto-action, the PR just goes to a Slack DM for human review. The complexity gate is a prerequisite for any auto-action, not just approval. Once it passes, a `blocker`/`major` at confidence 5 is POST, and APPROVE needs every condition the skill enumerates; anything else is a HOLD. The matrix and the approve conditions live in the `/kezoo-review-prs` skill.
 
