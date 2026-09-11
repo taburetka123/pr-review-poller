@@ -871,6 +871,24 @@ assert_findings_fresh() {
   return "$missing"
 }
 
+pin_held_to_admitted_head() {
+  local survivor _rest _o _r _n _head key reason tmp
+  [[ -f "$LEDGER_FILE" ]] || return 0
+  for survivor in "$@"; do
+    _rest="$survivor"
+    _o="${_rest%%$'\t'*}"; _rest="${_rest#*$'\t'}"
+    _r="${_rest%%$'\t'*}"; _rest="${_rest#*$'\t'}"
+    _n="${_rest%%$'\t'*}"; _rest="${_rest#*$'\t'}"
+    _head="${_rest%%$'\t'*}"
+    key="$_o/$_r#$_n"
+    reason=$(jq -r --arg key "$key" '.[$key].reason // empty' "$LEDGER_FILE" 2>/dev/null) || reason=""
+    [[ -z "$reason" || "$reason" == \[in-flight\]* ]] && continue
+    tmp=$(mktemp)
+    jq --arg key "$key" --arg commit "$_head" '.[$key].commit = $commit' "$LEDGER_FILE" > "$tmp" && mv "$tmp" "$LEDGER_FILE"
+  done
+  return 0
+}
+
 # Best-effort worktree + result-file cleanup for every dispatched survivor.
 # Hoisted so every post-launch exit path (run-all failure included) leaves no
 # leaked worktree or stale result file for the next tick to trip over.
@@ -1123,6 +1141,7 @@ OSA
   resolve_claude
   local rc=0
   "$CLAUDE" "${CLAUDE_FLAGS[@]}" -p "$SLASH ${_pr_urls[*]}" || rc=$?
+  pin_held_to_admitted_head "${FILTER_SURVIVORS[@]}"
 
   # Assert BEFORE cleanup (it reads result files), clean up BEFORE any exit
   # (spec-review F2: cleanup sequenced after exit 1 is dead code on exactly the

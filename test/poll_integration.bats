@@ -84,6 +84,15 @@ gh pr review 265 --approve --body "" || echo "write attempt denied rc=$?" >> "${
 mkdir -p "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service"
 printf '=== stub ===\nAction: APPROVE (blocked by verify guard)\n' >> "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service/265.log"
 CL
+  elif [ "$1" = "holds-stale" ]; then
+    cat > "$PR_REVIEW_POLLER_CLAUDE" <<'CL'
+#!/bin/bash
+{ printf '%s\n' "$@"; echo '--CALL--'; } >> "${BATS_TEST_TMPDIR:?}/claude-argv"
+L="$PR_REVIEW_POLLER_STATE_DIR/held.json"
+jq '.["roofstock/otto-leases-service#265"] = {commit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", held_at: "2026-01-01T00:00:00Z", reason: "1 major finding at conf 4", pr_url: "https://github.com/roofstock/otto-leases-service/pull/265"}' "$L" > "$L.tmp" && mv "$L.tmp" "$L"
+mkdir -p "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service"
+printf '=== stub ===\nAction: HOLD\n' >> "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service/265.log"
+CL
   else
     cat > "$PR_REVIEW_POLLER_CLAUDE" <<'CL'
 #!/bin/bash
@@ -142,6 +151,16 @@ assert_every_call_pinned() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"poll done"* ]]
   [ -f "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service/265.log" ]
+}
+
+@test "a HOLD the triage wrote is pinned to the head the poller admitted, so the next tick skips it" {
+  write_claude_stub holds-stale
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.["roofstock/otto-leases-service#265"].commit' "$PR_REVIEW_POLLER_STATE_DIR/held.json")" = "dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28" ]
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [[ "$output" == *"held at HEAD dc2354f pending human review"* ]]
+  [[ "$output" != *"launching"* ]]
 }
 
 @test "reviewers are launched by the poller, not the claude session" {
