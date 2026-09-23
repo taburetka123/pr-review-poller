@@ -41,6 +41,18 @@ case "$1 $2" in
 esac
 GH
   chmod +x "$BATS_TEST_TMPDIR/bin/gh"
+
+  # The poller resolves its model through the family map instead of carrying an
+  # id. The stub refuses any family but @opus, so a lane asking for the wrong
+  # one fails loudly rather than passing on a plausible-looking value.
+  export STUB_REVIEW_MODEL="claude-probe-9-9"
+  cat > "$BATS_TEST_TMPDIR/bin/dockwright" <<DW
+#!/bin/bash
+[ "\$1" = model ] && [ "\$2" = resolve ] || { echo "unexpected dockwright call: \$*" >&2; exit 2; }
+[ "\$3" = '@opus' ] || { echo "wrong family token: \$3" >&2; exit 3; }
+echo "$STUB_REVIEW_MODEL"
+DW
+  chmod +x "$BATS_TEST_TMPDIR/bin/dockwright"
   export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
 
   # The stub tees its stdin OUTSIDE PR_REVIEW_RESULT_DIR (cleanup_dispatched
@@ -128,8 +140,8 @@ assert_banner_has_no_overclaim() {
 # shadows the pin (finding E); and a new unpinned call site must fail, not
 # hide behind the last-written record (finding F).
 assert_every_call_pinned() {
-  awk '
-    /^--CALL--$/ { calls++; if (models != 1 || value != "claude-opus-5") bad=1; models=0; value=""; next }
+  awk -v want="$STUB_REVIEW_MODEL" '
+    /^--CALL--$/ { calls++; if (models != 1 || value != want) bad=1; models=0; value=""; next }
     prev { value=$0; prev=0 }
     $0 == "--model" { models++; prev=1 }
     END { exit (calls < 1 || bad) ? 1 : 0 }
