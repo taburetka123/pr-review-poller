@@ -42,9 +42,6 @@ esac
 GH
   chmod +x "$BATS_TEST_TMPDIR/bin/gh"
 
-  # The poller resolves its model through the family map instead of carrying an
-  # id. The stub refuses any family but @opus, so a lane asking for the wrong
-  # one fails loudly rather than passing on a plausible-looking value.
   export STUB_REVIEW_MODEL="claude-probe-9-9"
   cat > "$BATS_TEST_TMPDIR/bin/dockwright" <<DW
 #!/bin/bash
@@ -146,6 +143,51 @@ assert_every_call_pinned() {
     $0 == "--model" { models++; prev=1 }
     END { exit (calls < 1 || bad) ? 1 : 0 }
   ' "$BATS_TEST_TMPDIR/claude-argv"
+}
+
+write_osascript_shim() {
+  cat > "$BATS_TEST_TMPDIR/bin/osascript" <<'OSA'
+#!/bin/bash
+cat > "${BATS_TEST_TMPDIR:?}/osa-script"
+OSA
+  chmod +x "$BATS_TEST_TMPDIR/bin/osascript"
+}
+
+@test "head mode hands iTerm a claude command pinned to the resolved model" {
+  write_claude_stub silent
+  write_osascript_shim
+  run "$SCRIPT_UNDER_TEST" run --head --post
+  [ "$status" -eq 0 ]
+  local cmd
+  cmd=$(sed -n 's/^[[:space:]]*write text "\(.*\)"$/\1/p' "$BATS_TEST_TMPDIR/osa-script")
+  [ -n "$cmd" ]
+  bash -c "${cmd//\\\"/\"}"
+  assert_every_call_pinned
+  grep -q -- "--post" "$BATS_TEST_TMPDIR/claude-argv"
+}
+
+@test "an unresolvable review model fails the run before anything launches, in both modes" {
+  write_claude_stub writes
+  write_osascript_shim
+  printf '#!/bin/bash\nexit 0\n' > "$BATS_TEST_TMPDIR/bin/dockwright"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"poll FAILED"*"nothing was reviewed"* ]]
+  [[ "$output" != *"launching"* ]]
+  [ ! -e "$RUN_ALL_INPUT" ]
+  [ ! -e "$BATS_TEST_TMPDIR/claude-argv" ]
+  run "$SCRIPT_UNDER_TEST" run --head --post
+  [ "$status" -eq 1 ]
+  [ ! -e "$BATS_TEST_TMPDIR/osa-script" ]
+}
+
+@test "a dockwright that exits nonzero fails the run with the poller's own line" {
+  write_claude_stub writes
+  printf '#!/bin/bash\necho claude-partial-1\nexit 4\n' > "$BATS_TEST_TMPDIR/bin/dockwright"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"poll FAILED"*"rc=4"* ]]
+  [ ! -e "$RUN_ALL_INPUT" ]
 }
 
 @test "RED: triage that writes no findings log fails the tick loudly" {
