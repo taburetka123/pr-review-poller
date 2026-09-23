@@ -53,6 +53,15 @@ resolve_claude() {
   fi
 }
 
+resolve_review_model() {
+  local rc=0
+  REVIEW_MODEL="$(dockwright model resolve '@opus')" || rc=$?
+  if [[ "$rc" -ne 0 || -z "$REVIEW_MODEL" ]]; then
+    echo "[$(date -Iseconds)] poll FAILED — dockwright model resolve '@opus' exited rc=$rc with '${REVIEW_MODEL}'; nothing was reviewed; put a current dockwright on PATH"
+    exit 1
+  fi
+}
+
 # Pretty-print whichever scheduling key the plist uses. StartCalendarInterval
 # catches up on wake (one coalesced run); StartInterval does not.
 plist_schedule() {
@@ -929,6 +938,7 @@ cmd_run() {
     echo "--verify does not compose with --head (head mode is the legacy in-session path)" >&2
     exit 2
   fi
+  resolve_review_model
 
   SLASH="/kezoo-review-prs --auto --min-commit-age ${MIN_COMMIT_AGE}"
   [[ "$POST" == "1" ]] && SLASH="$SLASH --post"
@@ -942,7 +952,7 @@ tell application "iTerm"
     create tab with default profile
     delay 0.6
     tell current session of current tab
-      write text "$CLAUDE --model claude-opus-5 -p \"$SLASH\""
+      write text "$CLAUDE --model \"$REVIEW_MODEL\" -p \"$SLASH\""
     end tell
   end tell
 end tell
@@ -1134,7 +1144,7 @@ OSA
   # never holds a long foreground call. Model pinned: reviews post PUBLIC PR
   # comments; effort medium is plenty for rule-driven triage.
   SLASH="$SLASH --reviews-pre-run"
-  CLAUDE_FLAGS=(--model claude-opus-5 --effort medium)
+  CLAUDE_FLAGS=(--model "$REVIEW_MODEL" --effort medium)
   # VERIFY: no MCP servers at all — harness-enforced, so mcp github/slack write
   # tools do not exist in the triage session (layer 1 of the write block).
   if [[ "$VERIFY" == "1" ]]; then
