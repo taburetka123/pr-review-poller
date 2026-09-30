@@ -450,16 +450,16 @@ CSV
   assert_every_call_pinned
 }
 
-@test "a refusing role-args launches the triage on today's flags and logs the refusal" {
+@test "a refusing role-args fails the tick closed with no triage launched" {
   write_claude_stub writes
   export STUB_ROLE_ARGS=refuse
   run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"role-args GenericWorker --launch lane refused rc=2"* ]]
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"poll FAILED — role-args GenericWorker --launch lane refused rc=2"* ]]
   [[ "$output" == *"GenericWorker/role.lane.md missing; run"* ]]
-  [[ "$output" == *"poll done"* ]]
-  assert_triage_flags --model "$STUB_REVIEW_MODEL" --effort medium
-  assert_every_call_pinned
+  [[ "$output" != *"poll done"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/claude-argv" ]
+  [ ! -e "$PR_REVIEW_RESULT_DIR/265.md" ]
 }
 
 @test "an empty role-args answer launches the triage on today's flags and logs it" {
