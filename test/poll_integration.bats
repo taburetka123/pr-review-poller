@@ -43,8 +43,19 @@ GH
   chmod +x "$BATS_TEST_TMPDIR/bin/gh"
 
   export STUB_REVIEW_MODEL="claude-probe-9-9"
+  export STUB_ROLE_ARGS=empty
   cat > "$BATS_TEST_TMPDIR/bin/dockwright" <<DW
 #!/bin/bash
+if [ "\$1" = role-args ]; then
+  [ "\$*" = "role-args GenericWorker --launch lane" ] || { echo "unexpected role-args call: \$*" >&2; exit 3; }
+  case "\$STUB_ROLE_ARGS" in
+    empty) exit 0 ;;
+    lines) printf '%s\n' --append-system-prompt-file "$BATS_TEST_TMPDIR/roles/GenericWorker/role.lane.md" --settings "$BATS_TEST_TMPDIR/role-settings/0123456789abcdef.json" ;;
+    refuse) echo 'role-args: role GenericWorker: $BATS_TEST_TMPDIR/roles/GenericWorker/role.lane.md missing; run \`dockwright compose\`' >&2; exit 2 ;;
+    *) echo "unknown STUB_ROLE_ARGS: \$STUB_ROLE_ARGS" >&2; exit 4 ;;
+  esac
+  exit 0
+fi
 [ "\$1" = model ] && [ "\$2" = resolve ] || { echo "unexpected dockwright call: \$*" >&2; exit 2; }
 [ "\$3" = '@opus' ] || { echo "wrong family token: \$3" >&2; exit 3; }
 echo "$STUB_REVIEW_MODEL"
@@ -143,6 +154,11 @@ assert_every_call_pinned() {
     $0 == "--model" { models++; prev=1 }
     END { exit (calls < 1 || bad) ? 1 : 0 }
   ' "$BATS_TEST_TMPDIR/claude-argv"
+}
+
+triage_flags() {
+  [ "$(grep -c '^--CALL--$' "$BATS_TEST_TMPDIR/claude-argv")" = 1 ] || return 1
+  sed '/^-p$/,$d' "$BATS_TEST_TMPDIR/claude-argv" | paste -sd' ' -
 }
 
 write_osascript_shim() {
@@ -412,4 +428,65 @@ CSV
   run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
   [ "$status" -eq 3 ]
   [[ "$output" == *"refusing the real claude under test"* ]]
+}
+
+@test "role-args flags reach the triage ahead of the one pinned model" {
+  write_claude_stub writes
+  export STUB_ROLE_ARGS=lines
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"poll done"* ]]
+  [ "$(triage_flags)" = "--append-system-prompt-file $BATS_TEST_TMPDIR/roles/GenericWorker/role.lane.md --settings $BATS_TEST_TMPDIR/role-settings/0123456789abcdef.json --model $STUB_REVIEW_MODEL --effort medium" ]
+  assert_every_call_pinned
+}
+
+@test "verify mode carries the role flags beside the MCP lockout and the one pinned model" {
+  write_claude_stub writes
+  export STUB_ROLE_ARGS=lines
+  run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"poll done"* ]]
+  [ "$(triage_flags)" = "--append-system-prompt-file $BATS_TEST_TMPDIR/roles/GenericWorker/role.lane.md --settings $BATS_TEST_TMPDIR/role-settings/0123456789abcdef.json --model $STUB_REVIEW_MODEL --effort medium --strict-mcp-config --mcp-config {\"mcpServers\":{}}" ]
+  assert_every_call_pinned
+}
+
+@test "a refusing role-args launches the triage on today's flags and logs the refusal" {
+  write_claude_stub writes
+  export STUB_ROLE_ARGS=refuse
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"role-args GenericWorker --launch lane refused rc=2"* ]]
+  [[ "$output" == *"GenericWorker/role.lane.md missing; run"* ]]
+  [[ "$output" == *"poll done"* ]]
+  [ "$(triage_flags)" = "--model $STUB_REVIEW_MODEL --effort medium" ]
+  assert_every_call_pinned
+}
+
+@test "an empty role-args answer launches the triage on today's flags and logs it" {
+  write_claude_stub writes
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"role-args GenericWorker --launch lane printed no flags"* ]]
+  [[ "$output" == *"poll done"* ]]
+  [ "$(triage_flags)" = "--model $STUB_REVIEW_MODEL --effort medium" ]
+  assert_every_call_pinned
+}
+
+@test "under the launchd /bin/bash 3.2 a tick with an empty role-args answer passes" {
+  write_claude_stub writes
+  run /bin/bash "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"poll done"* ]]
+  [ "$(triage_flags)" = "--model $STUB_REVIEW_MODEL --effort medium" ]
+  assert_every_call_pinned
+}
+
+@test "under the launchd /bin/bash 3.2 a tick with role flags passes" {
+  write_claude_stub writes
+  export STUB_ROLE_ARGS=lines
+  run /bin/bash "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"poll done"* ]]
+  [ "$(triage_flags)" = "--append-system-prompt-file $BATS_TEST_TMPDIR/roles/GenericWorker/role.lane.md --settings $BATS_TEST_TMPDIR/role-settings/0123456789abcdef.json --model $STUB_REVIEW_MODEL --effort medium" ]
+  assert_every_call_pinned
 }

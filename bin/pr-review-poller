@@ -62,6 +62,22 @@ resolve_review_model() {
   fi
 }
 
+append_role_flags() {
+  local rc=0 lines arg
+  lines="$(dockwright role-args GenericWorker --launch lane)" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    echo "[$(date -Iseconds)] role-args GenericWorker --launch lane refused rc=$rc (see its stderr); triage launches without a role"
+    return 0
+  fi
+  if [[ -z "$lines" ]]; then
+    echo "[$(date -Iseconds)] role-args GenericWorker --launch lane printed no flags (no role manifests); triage launches without a role"
+    return 0
+  fi
+  while IFS= read -r arg; do
+    if [[ -n "$arg" ]]; then CLAUDE_FLAGS+=("$arg"); fi
+  done <<<"$lines"
+}
+
 # Pretty-print whichever scheduling key the plist uses. StartCalendarInterval
 # catches up on wake (one coalesced run); StartInterval does not.
 plist_schedule() {
@@ -1144,7 +1160,9 @@ OSA
   # never holds a long foreground call. Model pinned: reviews post PUBLIC PR
   # comments; effort medium is plenty for rule-driven triage.
   SLASH="$SLASH --reviews-pre-run"
-  CLAUDE_FLAGS=(--model "$REVIEW_MODEL" --effort medium)
+  CLAUDE_FLAGS=()
+  append_role_flags
+  CLAUDE_FLAGS+=(--model "$REVIEW_MODEL" --effort medium)
   # VERIFY: no MCP servers at all — harness-enforced, so mcp github/slack write
   # tools do not exist in the triage session (layer 1 of the write block).
   if [[ "$VERIFY" == "1" ]]; then
