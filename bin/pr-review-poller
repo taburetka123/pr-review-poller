@@ -1050,6 +1050,12 @@ OSA
       fi
     fi
   fi
+  local role_rc=0
+  dockwright role-args GenericWorker --launch lane >/dev/null || role_rc=$?
+  if [[ "$role_rc" -ne 0 ]]; then
+    echo "[$(date -Iseconds)] poll FAILED — role-args GenericWorker --launch lane refused rc=$role_rc; nothing was reviewed, no PR was claimed and the frequency gate was not stamped; run 'dockwright role-args GenericWorker --launch lane' to see why"
+    exit 1
+  fi
   mkdir -p "$(dirname "$LAST_RUN_FILE")"
   date +%s > "$LAST_RUN_FILE"
 
@@ -1160,10 +1166,10 @@ OSA
   # comments; effort medium is plenty for rule-driven triage.
   SLASH="$SLASH --reviews-pre-run"
   CLAUDE_FLAGS=()
-  local role_rc=0
+  role_rc=0
   append_role_flags || role_rc=$?
   if [[ "$role_rc" -ne 0 ]]; then
-    echo "[$(date -Iseconds)] poll FAILED — role-args GenericWorker --launch lane refused rc=$role_rc; nothing was triaged; ${#_pr_urls[@]} PR(s) remain in-flight; TTL re-queues in $INFLIGHT_TTL; run 'dockwright role-args GenericWorker --launch lane' to see why and fix it before 'pr-review-poller clear-hold'"
+    echo "[$(date -Iseconds)] poll FAILED — role-args GenericWorker --launch lane refused rc=$role_rc at triage time; nothing was triaged; ${#_pr_urls[@]} PR(s) remain in-flight; run 'dockwright role-args GenericWorker --launch lane' to see why; to retry now, fix it, run 'pr-review-poller clear-hold <pr>' for each PR, then 'pr-review-poller run --force'; otherwise they return on the first tick that passes the $REVIEW_FREQUENCY frequency gate after the $INFLIGHT_TTL in-flight TTL"
     cleanup_dispatched "${FILTER_SURVIVORS[@]}"
     exit 1
   fi

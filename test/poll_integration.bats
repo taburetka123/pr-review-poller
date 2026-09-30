@@ -52,6 +52,10 @@ if [ "\$1" = role-args ]; then
     empty) exit 0 ;;
     lines) printf '%s\n' --append-system-prompt-file "$BATS_TEST_TMPDIR/role home/GenericWorker/role.lane.md" --settings "$BATS_TEST_TMPDIR/role-settings/0123456789abcdef.json" ;;
     refuse) echo 'role-args: role GenericWorker: $BATS_TEST_TMPDIR/roles/GenericWorker/role.lane.md missing; run \`dockwright compose\`' >&2; exit 2 ;;
+    empty-then-refuse)
+      echo call >> "$BATS_TEST_TMPDIR/role-args-calls"
+      [ "\$(wc -l < "$BATS_TEST_TMPDIR/role-args-calls")" -ge 2 ] || exit 0
+      echo 'role-args: role GenericWorker: $BATS_TEST_TMPDIR/roles/GenericWorker/role.lane.md missing; run \`dockwright compose\`' >&2; exit 2 ;;
     *) echo "unknown STUB_ROLE_ARGS: \$STUB_ROLE_ARGS" >&2; exit 4 ;;
   esac
   exit 0
@@ -450,17 +454,35 @@ CSV
   assert_every_call_pinned
 }
 
-@test "a refusing role-args fails the tick closed with no triage launched" {
+@test "a refusing role-args fails the tick before any reviewer runs, claiming nothing" {
   write_claude_stub writes
   export STUB_ROLE_ARGS=refuse
   run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
   [ "$status" -eq 1 ]
-  [[ "$output" == *"poll FAILED — role-args GenericWorker --launch lane refused rc=2"* ]]
-  [[ "$output" == *"run 'dockwright role-args GenericWorker --launch lane' to see why and fix it before 'pr-review-poller clear-hold'"* ]]
+  [[ "$output" == *"poll FAILED — role-args GenericWorker --launch lane refused rc=2; nothing was reviewed, no PR was claimed and the frequency gate was not stamped"* ]]
+  [[ "$output" == *"GenericWorker/role.lane.md missing; run"* ]]
+  [[ "$output" != *"launching"* ]]
+  [[ "$output" != *"poll done"* ]]
+  [ ! -e "$RUN_ALL_INPUT" ]
+  [ ! -e "$BATS_TEST_TMPDIR/claude-argv" ]
+  [ ! -e "$PR_REVIEW_POLLER_STATE_DIR/last-run.epoch" ]
+  [ ! -e "$PR_REVIEW_POLLER_STATE_DIR/held.json" ] || ! grep -q 'in-flight' "$PR_REVIEW_POLLER_STATE_DIR/held.json"
+}
+
+@test "a role-args refusal that first appears at triage time fails closed with the PRs in flight" {
+  write_claude_stub writes
+  export STUB_ROLE_ARGS=empty-then-refuse
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 1 ]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/role-args-calls")" -eq 2 ]
+  [ -s "$RUN_ALL_INPUT" ]
+  [[ "$output" == *"poll FAILED — role-args GenericWorker --launch lane refused rc=2 at triage time; nothing was triaged; 1 PR(s) remain in-flight"* ]]
+  [[ "$output" == *"to retry now, fix it, run 'pr-review-poller clear-hold <pr>' for each PR, then 'pr-review-poller run --force'"* ]]
   [[ "$output" == *"GenericWorker/role.lane.md missing; run"* ]]
   [[ "$output" != *"poll done"* ]]
   [ ! -e "$BATS_TEST_TMPDIR/claude-argv" ]
   [ ! -e "$PR_REVIEW_RESULT_DIR/265.md" ]
+  [[ "$(jq -r '.["roofstock/otto-leases-service#265"].reason' "$PR_REVIEW_POLLER_STATE_DIR/held.json")" == "[in-flight]"* ]]
 }
 
 @test "an empty role-args answer launches the triage on today's flags and logs it" {
