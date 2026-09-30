@@ -456,6 +456,7 @@ CSV
   run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
   [ "$status" -eq 1 ]
   [[ "$output" == *"poll FAILED — role-args GenericWorker --launch lane refused rc=2"* ]]
+  [[ "$output" == *"run 'dockwright role-args GenericWorker --launch lane' to see why and fix it before 'pr-review-poller clear-hold'"* ]]
   [[ "$output" == *"GenericWorker/role.lane.md missing; run"* ]]
   [[ "$output" != *"poll done"* ]]
   [ ! -e "$BATS_TEST_TMPDIR/claude-argv" ]

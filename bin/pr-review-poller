@@ -1163,7 +1163,7 @@ OSA
   local role_rc=0
   append_role_flags || role_rc=$?
   if [[ "$role_rc" -ne 0 ]]; then
-    echo "[$(date -Iseconds)] poll FAILED — role-args GenericWorker --launch lane refused rc=$role_rc (see its stderr); nothing was triaged; ${#_pr_urls[@]} PR(s) remain in-flight; TTL re-queues in $INFLIGHT_TTL, or 'pr-review-poller clear-hold' to retry now"
+    echo "[$(date -Iseconds)] poll FAILED — role-args GenericWorker --launch lane refused rc=$role_rc; nothing was triaged; ${#_pr_urls[@]} PR(s) remain in-flight; TTL re-queues in $INFLIGHT_TTL; run 'dockwright role-args GenericWorker --launch lane' to see why and fix it before 'pr-review-poller clear-hold'"
     cleanup_dispatched "${FILTER_SURVIVORS[@]}"
     exit 1
   fi
