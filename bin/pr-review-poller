@@ -62,6 +62,21 @@ resolve_review_model() {
   fi
 }
 
+append_role_flags() {
+  local rc=0 lines arg
+  lines="$(dockwright role-args GenericWorker --launch lane)" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    return "$rc"
+  fi
+  if [[ -z "$lines" ]]; then
+    echo "[$(date -Iseconds)] role-args GenericWorker --launch lane printed no flags (no role manifests); triage launches without a role"
+    return 0
+  fi
+  while IFS= read -r arg; do
+    if [[ -n "$arg" ]]; then CLAUDE_FLAGS+=("$arg"); fi
+  done <<<"$lines"
+}
+
 # Pretty-print whichever scheduling key the plist uses. StartCalendarInterval
 # catches up on wake (one coalesced run); StartInterval does not.
 plist_schedule() {
@@ -1035,6 +1050,12 @@ OSA
       fi
     fi
   fi
+  local role_rc=0
+  dockwright role-args GenericWorker --launch lane >/dev/null || role_rc=$?
+  if [[ "$role_rc" -ne 0 ]]; then
+    echo "[$(date -Iseconds)] poll FAILED — role-args GenericWorker --launch lane refused rc=$role_rc; nothing was reviewed, no PR was claimed and the frequency gate was not stamped; run 'dockwright role-args GenericWorker --launch lane' to see why"
+    exit 1
+  fi
   mkdir -p "$(dirname "$LAST_RUN_FILE")"
   date +%s > "$LAST_RUN_FILE"
 
@@ -1144,7 +1165,15 @@ OSA
   # never holds a long foreground call. Model pinned: reviews post PUBLIC PR
   # comments; effort medium is plenty for rule-driven triage.
   SLASH="$SLASH --reviews-pre-run"
-  CLAUDE_FLAGS=(--model "$REVIEW_MODEL" --effort medium)
+  CLAUDE_FLAGS=()
+  role_rc=0
+  append_role_flags || role_rc=$?
+  if [[ "$role_rc" -ne 0 ]]; then
+    echo "[$(date -Iseconds)] poll FAILED — role-args GenericWorker --launch lane refused rc=$role_rc at triage time; nothing was triaged; ${#_pr_urls[@]} PR(s) remain in-flight; run 'dockwright role-args GenericWorker --launch lane' to see why; to retry now, fix it, run 'pr-review-poller clear-hold <pr>' for each PR, then 'pr-review-poller run --force'; otherwise they return on the first tick that passes the $REVIEW_FREQUENCY frequency gate after the $INFLIGHT_TTL in-flight TTL"
+    cleanup_dispatched "${FILTER_SURVIVORS[@]}"
+    exit 1
+  fi
+  CLAUDE_FLAGS+=(--model "$REVIEW_MODEL" --effort medium)
   # VERIFY: no MCP servers at all — harness-enforced, so mcp github/slack write
   # tools do not exist in the triage session (layer 1 of the write block).
   if [[ "$VERIFY" == "1" ]]; then
