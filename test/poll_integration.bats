@@ -48,6 +48,7 @@ case "$1 $2" in
   "api repos/roofstock/otto-leases-service/issues/265/timeline?per_page=100") echo '[]' ;;
   "api orgs/roofstock/teams/otto-leases-service-co/memberships/aleksandr-beliakov-rs") echo '{"state":"active","role":"member"}' ;;
   "api orgs/roofstock/teams/otto-leases-service-co/members?per_page=100") echo '[{"login":"aleksandr-beliakov-rs"}]' ;;
+  "api orgs/roofstock/teams/ai-code-review/memberships/aleksandr-beliakov-rs") echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
   "api repos/roofstock/otto-leases-service/pulls/265/requested_reviewers")
     printf '%s\n' "$@" >> "$BATS_TEST_TMPDIR/gh-writes"
     [ -n "${GH_STUB_REREQUEST_FAIL:-}" ] && { echo "HTTP 502: bad gateway" >&2; exit 1; }
@@ -282,6 +283,23 @@ OSA
   run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
   [ "$status" -eq 1 ]
   [[ "$output" == *"claude triage exited rc=1; 1 PR(s) remain in-flight"* ]]
+}
+
+@test "a PR that requests him neither by name nor through a team GitHub lists him in is skipped" {
+  write_claude_stub writes
+  export GH_STUB_REVIEW_REQUESTS='[{"__typename":"Team","slug":"roofstock/ai-code-review"}]'
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skip #265 (roofstock/otto-leases-service): requests him neither by name nor through a team GitHub lists him in"* ]]
+  [[ "$output" != *"launching"* ]]
+}
+
+@test "a PR that requests him by name is reviewed" {
+  write_claude_stub writes
+  export GH_STUB_REVIEW_REQUESTS='[{"__typename":"User","login":"aleksandr-beliakov-rs"}]'
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"launching 1 reviewer(s)"* ]]
 }
 
 @test "reviewers are launched by the poller, not the claude session" {

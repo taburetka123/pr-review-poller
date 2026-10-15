@@ -832,6 +832,10 @@ filter_prs() {
       echo "  skip #$number ($owner/$repo): could not read its requested teams or his membership in them"
       continue
     fi
+    if [[ -z "$team_requests" ]] && printf '%s' "$info" | jq -e --arg me "$me" '(.reviewRequests // []) | any(.__typename == "Team") and (any(.login == $me) | not)' >/dev/null 2>&1; then
+      echo "  skip #$number ($owner/$repo): requests him neither by name nor through a team GitHub lists him in"
+      continue
+    fi
 
     # Tab-separated tuple so cmd_run can pre-write in-flight ledger entries
     # before invoking claude (needs head_oid, not just URL).
