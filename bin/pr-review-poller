@@ -11,6 +11,7 @@ LOCK_FILE="${PR_REVIEW_POLLER_LOCK_FILE:-$HOME/.local/state/pr-review-poller.loc
 LAST_RUN_FILE="$STATE_DIR/last-run.epoch"
 LAST_PRUNE_FILE="$STATE_DIR/last-prune.epoch"
 LEDGER_FILE="$STATE_DIR/held.json"
+TEAM_REQUESTS_FILE="$STATE_DIR/team-requests.json"
 STDOUT_LOG="$HOME/worktrees/.pr-review-poller-stdout.log"
 STDERR_LOG="$HOME/worktrees/.pr-review-poller-stderr.log"
 FINDINGS_DIR="${PR_REVIEW_FINDINGS_ROOT:-$HOME/worktrees/.pr-review-findings}"
@@ -103,9 +104,12 @@ pr-review-poller — unattended PR auto-review
 Usage:
   pr-review-poller [status]          Show timer state, config, last run
   pr-review-poller start             Load the launchd job (begin polling)
-  pr-review-poller start [--post] [--min-commit-age DUR] [--frequency DUR]
+  pr-review-poller start [--no-post] [--min-commit-age DUR] [--frequency DUR]
                                      Start with flags baked into the plist's
-                                     job args so every tick uses them
+                                     job args so every tick uses them. Each
+                                     start with flags replaces every earlier
+                                     flag in the plist; repeat --no-post to
+                                     keep it
   pr-review-poller stop              Unload the launchd job (pause polling)
   pr-review-poller run [--head]      Run one review cycle now
                                      --head opens an iTerm2 tab running the
@@ -144,10 +148,12 @@ Usage:
                                      APPROVE) — nothing lands on GitHub;
                                      ledger entries persist as usual
                                      (clear-hold to reset)
-  pr-review-poller run --post        Allow posting for this run. Default is
-                                     no-post: POST decisions become HOLD;
-                                     APPROVE still approves. Incompatible
-                                     with --verify
+  pr-review-poller run --no-post     Do not post this run: the triage turns
+                                     a would-be POST into a HOLD and posts
+                                     nothing; APPROVE still approves. Default
+                                     posts, except under --verify and --head
+  pr-review-poller run --post        Post (the default). Incompatible with
+                                     --verify and --head
   pr-review-poller logs [-n N]       Tail the stdout log (follow mode)
   pr-review-poller findings          List recent PR-findings logs (mtime sort)
   pr-review-poller findings <pr>     Print findings log for a PR. <pr> is a
@@ -156,7 +162,9 @@ Usage:
                                      repos)
   pr-review-poller clear-hold <pr>   Remove a PR's held-ledger entry so the
                                      next tick re-reviews it. <pr> is a URL
-                                     or bare number
+                                     or bare number. A PR whose latest review
+                                     by the work account is at its head (a
+                                     posted comment) waits for a new head
   pr-review-poller prune             Delete findings logs for PRs that are no
                                      longer OPEN (MERGED or CLOSED). Runs
                                      automatically once/24h during 'run'
@@ -241,13 +249,11 @@ cmd_start() {
     exit 1
   fi
 
-  # Flags here rewrite the plist's ProgramArguments so every launchd tick runs
-  # `pr-review-poller run <flags>`. Without flags, the existing plist is left
-  # alone (so `start` after a prior `start --post` preserves posting mode).
-  local POST_FLAG=0 MIN_AGE_FLAG="" FREQ_FLAG="" had_flag=0
+  local POST_ARG="" MIN_AGE_FLAG="" FREQ_FLAG="" had_flag=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --post) POST_FLAG=1; had_flag=1; shift ;;
+      --post) POST_ARG="--post"; had_flag=1; shift ;;
+      --no-post) POST_ARG="--no-post"; had_flag=1; shift ;;
       --min-commit-age) MIN_AGE_FLAG="$2"; had_flag=1; shift 2 ;;
       --frequency) FREQ_FLAG="$2"; had_flag=1; shift 2 ;;
       *) echo "unknown flag: $1" >&2; exit 2 ;;
@@ -258,7 +264,7 @@ cmd_start() {
     local args_json="[\"$HOME/.local/bin/pr-review-poller\",\"run\""
     [[ -n "$MIN_AGE_FLAG" ]] && args_json="$args_json,\"--min-commit-age\",\"$MIN_AGE_FLAG\""
     [[ -n "$FREQ_FLAG" ]]    && args_json="$args_json,\"--frequency\",\"$FREQ_FLAG\""
-    [[ "$POST_FLAG" == "1" ]] && args_json="$args_json,\"--post\""
+    [[ -n "$POST_ARG" ]]     && args_json="$args_json,\"$POST_ARG\""
     args_json="$args_json]"
     plutil -replace ProgramArguments -json "$args_json" "$PLIST_DST"
   fi
@@ -662,9 +668,13 @@ repo_owned() {
 # Writes surviving PR URLs into the FILTER_SURVIVORS array (caller reads it).
 # Prints "  skip #N: <reason>" log lines to stdout so the poller log captures them.
 FILTER_SURVIVORS=()
+FILTER_TEAMS=()
+MEMBERSHIP_BLIND_SKIPS=0
 OWNED_GATE_FAILED=0
 filter_prs() {
   FILTER_SURVIVORS=()
+  FILTER_TEAMS=()
+  MEMBERSHIP_BLIND_SKIPS=0
   local me="$WORK_GH_USER"
   local ledger="$LEDGER_FILE"
   local now_epoch; now_epoch=$(date +%s)
@@ -732,7 +742,7 @@ filter_prs() {
     fi
 
     local info
-    if ! info=$(gh pr view "$number" -R "$owner/$repo" --json state,reviews,headRefOid,headRefName 2>&1); then
+    if ! info=$(gh pr view "$number" -R "$owner/$repo" --json state,reviews,headRefOid,headRefName,reviewRequests 2>&1); then
       echo "  skip #$number ($owner/$repo): gh pr view failed ($info)"
       continue
     fi
@@ -819,9 +829,21 @@ filter_prs() {
       fi
     fi
 
+    local team_requests
+    if ! team_requests=$(owned_team_requests "$info" "$owner" "$me"); then
+      echo "  skip #$number ($owner/$repo): could not read its requested teams or his membership in them"
+      continue
+    fi
+    if [[ -z "$team_requests" ]] && printf '%s' "$info" | jq -e --arg me "$me" '(.reviewRequests // []) | any(.__typename == "Team") and (any(.login == $me) | not)' >/dev/null 2>&1; then
+      echo "  skip #$number ($owner/$repo): requests him neither by name nor through a team GitHub lists him in"
+      MEMBERSHIP_BLIND_SKIPS=$((MEMBERSHIP_BLIND_SKIPS + 1))
+      continue
+    fi
+
     # Tab-separated tuple so cmd_run can pre-write in-flight ledger entries
     # before invoking claude (needs head_oid, not just URL).
     FILTER_SURVIVORS+=("$owner"$'\t'"$repo"$'\t'"$number"$'\t'"$head_oid"$'\t'"$head_ref"$'\t'"$my_last_oid"$'\t'"https://github.com/$owner/$repo/pull/$number")
+    FILTER_TEAMS+=("$team_requests")
   done < <(echo "$raw" | jq -r '.[] | [
       (.repository.nameWithOwner | split("/")[0]),
       (.repository.nameWithOwner | split("/")[1]),
@@ -916,6 +938,169 @@ pin_held_to_admitted_head() {
   return 0
 }
 
+owned_team_requests() {
+  local info="$1" org="$2" me="$3" slugs slug out="" resp state
+  slugs=$(printf '%s' "$info" | jq -r '(.reviewRequests // [])[] | select(.__typename == "Team") | .slug | sub("^[^/]*/"; "")' 2>/dev/null) || return 1
+  while IFS= read -r slug; do
+    [[ -z "$slug" ]] && continue
+    if resp=$(gh api "orgs/$org/teams/$slug/memberships/$me" 2>&1); then
+      state=$(printf '%s' "$resp" | jq -r '.state // empty' 2>/dev/null) || return 1
+      [[ "$state" == "active" ]] && out="${out:+$out,}$slug"
+    elif [[ "$resp" != *"HTTP 404"* ]]; then
+      return 1
+    fi
+  done <<<"$slugs"
+  printf '%s\n' "$out"
+}
+
+record_team_requests() {
+  local file="$1" since="$2" i _rest _o _r _n _url updates="" tmp cur='{}'
+  [[ ${#FILTER_SURVIVORS[@]} -eq 0 ]] && return 0
+  if [[ -f "$file" ]]; then
+    cur=$(cat "$file" 2>/dev/null) || return 1
+    printf '%s' "$cur" | jq -e 'type == "object"' >/dev/null 2>&1 || return 1
+  fi
+  for i in "${!FILTER_SURVIVORS[@]}"; do
+    [[ -z "${FILTER_TEAMS[$i]:-}" ]] && continue
+    _rest="${FILTER_SURVIVORS[$i]}"
+    _o="${_rest%%$'\t'*}"; _rest="${_rest#*$'\t'}"
+    _r="${_rest%%$'\t'*}"; _rest="${_rest#*$'\t'}"
+    _n="${_rest%%$'\t'*}"
+    _url="${FILTER_SURVIVORS[$i]##*$'\t'}"
+    updates="$updates$_o/$_r#$_n"$'\t'"$_url"$'\t'"${FILTER_TEAMS[$i]}"$'\n'
+  done
+  [[ -z "$updates" ]] && return 0
+  mkdir -p "$(dirname "$file")" 2>/dev/null || return 1
+  tmp=$(mktemp "$file.XXXXXX" 2>/dev/null) || return 1
+  if ! printf '%s' "$updates" | jq -R -s --arg since "$since" --argjson cur "$cur" '
+      reduce (split("\n")[] | select(length > 0) | split("\t")) as $u ($cur;
+        .[$u[0]] = {
+          teams: (((.[$u[0]].teams // []) + ($u[2] | split(","))) | unique),
+          since: (.[$u[0]].since // $since),
+          pr_url: $u[1]
+        })' > "$tmp" 2>/dev/null || ! mv "$tmp" "$file" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  return 0
+}
+
+restore_team_requests() {
+  local file="$1" me="$2" verify="$3"
+  [[ -f "$file" ]] || return 0
+  local keys
+  if ! keys=$(jq -r 'keys[]' "$file" 2>/dev/null); then
+    echo "[$(date -Iseconds)] WARN: could not read team requests in $file; nothing re-requested this pass"
+    return 0
+  fi
+  local changes="" key _rest o r n since teams info state team members verdict timeline removed out kept
+  while IFS= read -r key; do
+    [[ -z "$key" ]] && continue
+    o="${key%%/*}"; _rest="${key#*/}"
+    r="${_rest%%#*}"; n="${_rest#*#}"
+    since=$(jq -r --arg k "$key" '.[$k].since // empty' "$file" 2>/dev/null) || since=""
+    teams=$(jq -r --arg k "$key" '(.[$k].teams // [])[]' "$file" 2>/dev/null) || teams=""
+    if ! info=$(gh pr view "$n" -R "$o/$r" --json state,author,reviewRequests,reviews 2>&1); then
+      echo "[$(date -Iseconds)] WARN: could not read review requests of $key ($info); retrying next tick"
+      continue
+    fi
+    state=$(printf '%s' "$info" | jq -r '.state // empty' 2>/dev/null) || state=""
+    if [[ -z "$state" ]]; then
+      echo "[$(date -Iseconds)] WARN: could not read review requests of $key (no state in the gh pr view output); retrying next tick"
+      continue
+    fi
+    if [[ "$state" != "OPEN" ]]; then
+      changes="$changes$key"$'\t'$'\n'
+      continue
+    fi
+    kept=""
+    timeline=""
+    while IFS= read -r team; do
+      [[ -z "$team" ]] && continue
+      if ! members=$(gh api "orgs/$o/teams/$team/members?per_page=100" --paginate 2>&1) \
+         || ! members=$(printf '%s' "$members" | jq -s -c '[add // [] | .[] | .login]' 2>/dev/null); then
+        echo "[$(date -Iseconds)] WARN: could not read the members of team $team on $key; retrying next tick"
+        kept="$kept$team"$'\n'
+        continue
+      fi
+      if ! verdict=$(printf '%s' "$info" | jq -r --arg t "$team" --arg me "$me" --arg since "$since" --argjson members "$members" '
+          ($since | fromdateiso8601) as $s
+          | (.author.login // "") as $author
+          | if [(.reviewRequests // [])[] | select(.__typename == "Team") | .slug | sub("^[^/]*/"; "")] | any(. == $t) then "requested"
+            else
+              [(.reviews // [])[]
+                | select(.submittedAt != null)
+                | select((.submittedAt | fromdateiso8601) >= $s)
+                | select(.author.login != $author)
+                | select(.author.login as $l | $members | any(. == $l))]
+              | sort_by(.submittedAt | fromdateiso8601)
+              | if any(.state == "APPROVED") then "settled"
+                else first as $r
+                  | if $r != null and $r.author.login == $me and $r.state == "COMMENTED" then "due" else "settled" end
+                end
+            end' 2>/dev/null); then
+        echo "[$(date -Iseconds)] WARN: could not judge team $team on $key from its reviews; retrying next tick"
+        kept="$kept$team"$'\n'
+        continue
+      fi
+      [[ "$verdict" != "due" ]] && continue
+      if [[ -z "$timeline" ]]; then
+        if ! timeline=$(gh api "repos/$o/$r/issues/$n/timeline?per_page=100" --paginate 2>&1); then
+          echo "[$(date -Iseconds)] WARN: could not read the timeline of $key ($timeline); retrying next tick"
+          timeline=""
+          kept="$kept$team"$'\n'
+          continue
+        fi
+      fi
+      if ! removed=$(printf '%s' "$timeline" | jq -s -r --arg t "$team" --arg since "$since" '
+          ($since | fromdateiso8601) as $s
+          | [add // [] | .[]
+              | select(.event == "review_request_removed")
+              | select((.created_at // "") as $c | ($c | test("^[0-9]{4}-")) and ($c | fromdateiso8601) >= $s)
+              | select((.requested_team.slug // null) == $t or (.requested_team == null and .requested_reviewer == null))]
+          | length > 0' 2>/dev/null); then
+        echo "[$(date -Iseconds)] WARN: could not read the timeline of $key (unparsable timeline); retrying next tick"
+        kept="$kept$team"$'\n'
+        continue
+      fi
+      if [[ "$removed" == "true" ]]; then
+        echo "[$(date -Iseconds)] team $team on $key was removed by hand; not re-requested"
+        continue
+      fi
+      if [[ "$verify" == "1" ]]; then
+        echo "[$(date -Iseconds)] verify mode: would re-request review from team $team on $key"
+        kept="$kept$team"$'\n'
+        continue
+      fi
+      if out=$(gh api "repos/$o/$r/pulls/$n/requested_reviewers" -X POST -f "team_reviewers[]=$team" 2>&1); then
+        if printf '%s' "$out" | jq -e --arg t "$team" '[(.requested_teams // [])[] | .slug] | any(. == $t)' >/dev/null 2>&1; then
+          echo "[$(date -Iseconds)] re-requested review from team $team on $key"
+          continue
+        fi
+        out="response does not list the team"
+      fi
+      echo "[$(date -Iseconds)] ERROR: re-request of team $team on $key failed ($out); retrying next tick"
+      kept="$kept$team"$'\n'
+    done <<<"$teams"
+    changes="$changes$key"$'\t'"$(printf '%s' "$kept" | paste -s -d, -)"$'\n'
+  done <<<"$keys"
+  [[ -z "$changes" ]] && return 0
+  local tmp
+  if ! tmp=$(mktemp "$file.XXXXXX" 2>/dev/null); then
+    echo "[$(date -Iseconds)] WARN: could not update $file; its entries are judged again next tick"
+    return 0
+  fi
+  if ! printf '%s' "$changes" | jq -R -s --slurpfile cur "$file" '
+      reduce (split("\n")[] | select(length > 0) | split("\t")) as $c ($cur[0];
+        ($c[1] // "" | split(",") | map(select(length > 0))) as $kept
+        | if ($kept | length) == 0 then del(.[$c[0]]) else .[$c[0]].teams = $kept end)' > "$tmp" 2>/dev/null \
+     || ! mv "$tmp" "$file" 2>/dev/null; then
+    rm -f "$tmp"
+    echo "[$(date -Iseconds)] WARN: could not update $file; its entries are judged again next tick"
+  fi
+  return 0
+}
+
 # Best-effort worktree + result-file cleanup for every dispatched survivor.
 # Hoisted so every post-launch exit path (run-all failure included) leaves no
 # leaked worktree or stale result file for the next tick to trip over.
@@ -931,7 +1116,7 @@ cleanup_dispatched() {
 cmd_run() {
   load_config
   MODE="headless"
-  POST=0
+  POST=""
   FORCE=0
   VERIFY=0
   while [[ $# -gt 0 ]]; do
@@ -940,6 +1125,7 @@ cmd_run() {
       --min-commit-age) MIN_COMMIT_AGE="$2"; shift 2 ;;
       --frequency) REVIEW_FREQUENCY="$2"; shift 2 ;;
       --post) POST=1; shift ;;
+      --no-post) POST=0; shift ;;
       --force) FORCE=1; shift ;;
       --verify) VERIFY=1; FORCE=1; shift ;;
       *) echo "unknown flag: $1" >&2; exit 2 ;;
@@ -953,10 +1139,16 @@ cmd_run() {
     echo "--verify does not compose with --head (head mode is the legacy in-session path)" >&2
     exit 2
   fi
+  if [[ "$MODE" == "head" && "$POST" == "1" ]]; then
+    echo "--post does not compose with --head (head mode records no team requests, so a post there drops the team for good)" >&2
+    exit 2
+  fi
+  if [[ -z "$POST" ]]; then
+    if [[ "$VERIFY" == "1" || "$MODE" == "head" ]]; then POST=0; else POST=1; fi
+  fi
   resolve_review_model
 
   SLASH="/kezoo-review-prs --auto --min-commit-age ${MIN_COMMIT_AGE}"
-  [[ "$POST" == "1" ]] && SLASH="$SLASH --post"
 
   if [[ "$MODE" == "head" ]]; then
     resolve_claude
@@ -1084,6 +1276,7 @@ OSA
     OWNED_GATE_FAILED=1
   fi
   rm -f "$owned_out"
+  restore_team_requests "$TEAM_REQUESTS_FILE" "$WORK_GH_USER" "$VERIFY"
 
   if ! filter_prs; then
     echo "[$(date -Iseconds)] filter failed, skipping tick"
@@ -1098,6 +1291,15 @@ OSA
   if [[ "$OWNED_GATE_FAILED" == "1" ]]; then
     echo "[$(date -Iseconds)] poll FAILED — domain gate unavailable, every PR skipped this tick (see the ERROR above); nothing was reviewed"
     exit 1
+  fi
+
+  if [[ "$MEMBERSHIP_BLIND_SKIPS" -gt 0 ]]; then
+    local _blind="$MEMBERSHIP_BLIND_SKIPS PR(s) request him only through teams GitHub does not list him in; check that the work account's gh token carries read:org"
+    if [[ ${#FILTER_SURVIVORS[@]} -eq 0 ]]; then
+      echo "[$(date -Iseconds)] poll FAILED — $_blind; nothing was reviewed"
+      exit 1
+    fi
+    echo "[$(date -Iseconds)] WARN: $_blind"
   fi
 
   if [[ ${#FILTER_SURVIVORS[@]} -eq 0 ]]; then
@@ -1138,6 +1340,12 @@ OSA
        '.[$key] = {commit: $commit, held_at: $now, reason: "[in-flight] auto-claimed before review", pr_url: $url}' \
        "$LEDGER" > "$_tmp" && mv "$_tmp" "$LEDGER"
   done
+  local record_rc=0
+  record_team_requests "$TEAM_REQUESTS_FILE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || record_rc=$?
+  if [[ "$record_rc" -ne 0 ]]; then
+    echo "[$(date -Iseconds)] WARN: could not record team requests in $TEAM_REQUESTS_FILE; this tick's triage runs without --post"
+    POST=0
+  fi
 
   # Run the reviewers HERE, in the poller's own bash, before any claude session
   # exists. History: the skill used to launch pr-review-run-all from inside the
@@ -1164,6 +1372,7 @@ OSA
   # Triage only: the reviewers already ran, so the claude session is short and
   # never holds a long foreground call. Model pinned: reviews post PUBLIC PR
   # comments; effort medium is plenty for rule-driven triage.
+  [[ "$POST" == "1" ]] && SLASH="$SLASH --post"
   SLASH="$SLASH --reviews-pre-run"
   CLAUDE_FLAGS=()
   role_rc=0
@@ -1184,6 +1393,7 @@ OSA
   local rc=0
   "$CLAUDE" "${CLAUDE_FLAGS[@]}" -p "$SLASH ${_pr_urls[*]}" || rc=$?
   pin_held_to_admitted_head "${FILTER_SURVIVORS[@]}"
+  restore_team_requests "$TEAM_REQUESTS_FILE" "$WORK_GH_USER" "$VERIFY"
 
   # Assert BEFORE cleanup (it reads result files), clean up BEFORE any exit
   # (spec-review F2: cleanup sequenced after exit 1 is dead code on exactly the
@@ -1204,7 +1414,17 @@ OSA
   fi
 
   if [[ $rc -ne 0 ]]; then
-    echo "[$(date -Iseconds)] poll FAILED — claude triage exited rc=$rc; ${#_pr_urls[@]} PR(s) remain in-flight; TTL re-queues in $INFLIGHT_TTL, or 'pr-review-poller clear-hold' to retry now"
+    local _inflight=0 _held=0 _s _reason
+    for _s in "${FILTER_SURVIVORS[@]}"; do
+      IFS=$'\t' read -r _o _r _n _rest <<<"$_s"
+      _reason=$(jq -r --arg k "$_o/$_r#$_n" '.[$k].reason // ""' "$LEDGER" 2>/dev/null) || _reason="[in-flight]"
+      if [[ "$_reason" == "[in-flight]"* ]]; then
+        _inflight=$((_inflight + 1))
+      elif [[ -n "$_reason" ]]; then
+        _held=$((_held + 1))
+      fi
+    done
+    echo "[$(date -Iseconds)] poll FAILED — claude triage exited rc=$rc; $_inflight PR(s) remain in-flight; TTL re-queues in $INFLIGHT_TTL, or 'pr-review-poller clear-hold' to retry now; $_held PR(s) carry the triage's ledger entry ('pr-review-poller status' shows its reason)"
     exit "$rc"
   fi
   if [[ "$missing" -gt 0 ]]; then

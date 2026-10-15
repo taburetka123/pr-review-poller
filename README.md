@@ -2,17 +2,19 @@
 
 Background launchd job that runs `claude -p "/kezoo-review-prs --auto"` on a timer so teammate PRs get reviewed without you at the keyboard.
 
-Pairs with the `--auto` mode on the personal `/kezoo-review-prs` skill — which only posts confidence-5 blocker/major findings, approves otherwise, and silently drops everything else.
+Pairs with the `--auto` mode on the personal `/kezoo-review-prs` skill — which posts every blocker and major finding, holds or approves otherwise, and drops minor and nit findings.
 
 ## What auto mode does per PR
 
 Three possible actions:
 
-- **POST** — leave each finding as a **standalone inline PR comment** (not wrapped in a review submission) so the timeline gets per-comment "commented on" entries instead of a "reviewed changes" block. Every body is footer-tagged `*Automated review*` so humans can tell the source. Only used when a `blocker` or `major` finding clears the author's post threshold (see trust matrix in the `/kezoo-review-prs` skill).
-- **HOLD** — don't touch GitHub. Record the PR in a local ledger (`~/.local/state/pr-review-poller/held.json`) and DM yourself on Slack with the full review so you can decide. The PR is skipped on subsequent polls (until new commits) so you aren't spammed.
+- **POST** — leave each finding as a **standalone inline PR comment** (not wrapped in a review submission) so the timeline gets per-comment "commented on" entries instead of a "reviewed changes" block. Every body is footer-tagged `*Automated review*` so humans can tell the source. Used for every `blocker` and `major` finding, at any confidence, for every author. A POST also sends the review to your Slack channel.
+- **HOLD** — submit no review. Record the PR in a local ledger (`~/.local/state/pr-review-poller/held.json`) and DM yourself on Slack with the full review so you can decide. The PR is skipped on subsequent polls (until new commits) so you aren't spammed. A HOLD for the author, the PR complexity or a prior-reviewer concern still posts its blocker and major findings as comments. The hold reason never goes to GitHub.
 - **APPROVE** — submit an `APPROVE` review with an empty body. No text, no noise.
 
-Trust is per-author and expressed as the **maximum PR complexity (1–5) we'll let the bot act on without a human**. The reviewing subagent rates each PR's complexity 1–5; if `complexity > author trust`, the action is HOLD — no findings are examined for the auto-action, the PR just goes to a Slack DM for human review. The complexity gate is a prerequisite for any auto-action, not just approval: only once it passes do we look at findings and decide POST (`blocker`/`major` at confidence 5) vs APPROVE. Full matrix lives in the `/kezoo-review-prs` skill.
+GitHub drops a requested team once a member reviews, so a posted comment removes your team from the PR. After the triage, and on later ticks until it settles, the poller re-requests review from that team (`~/.local/state/pr-review-poller/team-requests.json`). It re-requests nothing after an APPROVE.
+
+Trust is per-author and expressed as the **maximum PR complexity (1–5) we'll let the bot act on without a human**. The reviewing subagent rates each PR's complexity 1–5; if `complexity > author trust`, the action is HOLD — the PR goes to a Slack DM for human review, and its blocker and major findings still post. The complexity gate is a prerequisite for approval: only once it passes do we decide POST (any `blocker`/`major`) vs APPROVE. Full matrix lives in the `/kezoo-review-prs` skill.
 
 ## Safety gates
 
@@ -50,6 +52,7 @@ Installed artifacts:
 ```
 pr-review-poller              # status — is it running? schedule? last run? config?
 pr-review-poller start        # begin polling (launchctl load)
+pr-review-poller start --no-post   # begin polling, never post (any later start with flags drops it)
 pr-review-poller stop         # pause polling (launchctl unload)
 pr-review-poller run          # run one cycle right now (headless, respects lock)
 pr-review-poller run --head   # run one cycle in a new iTerm2 tab, no lock (debug)
@@ -63,8 +66,8 @@ Ad-hoc override:
 ```
 pr-review-poller run --min-commit-age 0   # disable age gate for this single run
 pr-review-poller run --force              # bypass the frequency gate for this single run
-pr-review-poller run --post               # allow posting. Default is no-post:
-                                          # POST decisions become HOLD, APPROVE still approves
+pr-review-poller run --no-post            # do not post this run: POST decisions become HOLD,
+                                          # APPROVE still approves. Default posts, except --verify and --head
 ```
 
 ## Uninstall
