@@ -1406,7 +1406,17 @@ OSA
   fi
 
   if [[ $rc -ne 0 ]]; then
-    echo "[$(date -Iseconds)] poll FAILED — claude triage exited rc=$rc; ${#_pr_urls[@]} PR(s) remain in-flight; TTL re-queues in $INFLIGHT_TTL, or 'pr-review-poller clear-hold' to retry now"
+    local _inflight=0 _held=0 _s _reason
+    for _s in "${FILTER_SURVIVORS[@]}"; do
+      IFS=$'\t' read -r _o _r _n _rest <<<"$_s"
+      _reason=$(jq -r --arg k "$_o/$_r#$_n" '.[$k].reason // ""' "$LEDGER" 2>/dev/null) || _reason="[in-flight]"
+      if [[ "$_reason" == "[in-flight]"* ]]; then
+        _inflight=$((_inflight + 1))
+      elif [[ -n "$_reason" ]]; then
+        _held=$((_held + 1))
+      fi
+    done
+    echo "[$(date -Iseconds)] poll FAILED — claude triage exited rc=$rc; $_inflight PR(s) remain in-flight; TTL re-queues in $INFLIGHT_TTL, or 'pr-review-poller clear-hold' to retry now; $_held PR(s) carry the triage's ledger entry ('pr-review-poller status' shows its reason)"
     exit "$rc"
   fi
   if [[ "$missing" -gt 0 ]]; then

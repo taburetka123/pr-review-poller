@@ -129,6 +129,15 @@ gh pr review 265 --approve --body "" || echo "write attempt denied rc=$?" >> "${
 mkdir -p "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service"
 printf '=== stub ===\nAction: APPROVE (blocked by verify guard)\n' >> "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service/265.log"
 CL
+  elif [ "$1" = "records-then-dies" ]; then
+    cat > "$PR_REVIEW_POLLER_CLAUDE" <<'CL'
+#!/bin/bash
+{ printf '%s\n' "$@"; echo '--CALL--'; } >> "${BATS_TEST_TMPDIR:?}/claude-argv"
+L="$PR_REVIEW_POLLER_STATE_DIR/held.json"
+jq '.["roofstock/otto-leases-service#265"] = {commit: "dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28", held_at: "2026-01-01T00:00:00Z", reason: "posting 2 comment(s) did not finish; see the findings log", pr_url: "https://github.com/roofstock/otto-leases-service/pull/265"}' "$L" > "$L.tmp" && mv "$L.tmp" "$L"
+touch "$BATS_TEST_TMPDIR/posted"
+exit 1
+CL
   elif [ "$1" = "holds-stale" ]; then
     cat > "$PR_REVIEW_POLLER_CLAUDE" <<'CL'
 #!/bin/bash
@@ -255,6 +264,22 @@ OSA
   run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
   [[ "$output" == *"held at HEAD dc2354f pending human review"* ]]
   [[ "$output" != *"launching"* ]]
+}
+
+@test "a triage that records its post and then dies is reported as held, not in-flight" {
+  write_claude_stub records-then-dies
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"claude triage exited rc=1; 0 PR(s) remain in-flight"* ]]
+  [[ "$output" == *"1 PR(s) carry the triage's ledger entry"* ]]
+}
+
+@test "a triage that dies before recording anything leaves its PR in-flight" {
+  printf '#!/bin/bash\nexit 1\n' > "$PR_REVIEW_POLLER_CLAUDE"
+  chmod +x "$PR_REVIEW_POLLER_CLAUDE"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"claude triage exited rc=1; 1 PR(s) remain in-flight"* ]]
 }
 
 @test "reviewers are launched by the poller, not the claude session" {
