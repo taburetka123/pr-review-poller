@@ -35,8 +35,21 @@ CSV
 case "$1 $2" in
   "auth token") echo "gho_stub" ;;
   "search prs") echo '[{"number":265,"title":"t","repository":{"nameWithOwner":"roofstock/otto-leases-service"},"author":{"login":"dmitry-indikeev-rs"}}]' ;;
-  "pr view") echo '{"state":"'"${GH_STUB_PR_STATE:-OPEN}"'","headRefOid":"dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28","reviews":[],"headRefName":"LRX-9992-branch"}' ;;
+  "pr view")
+    default_rr='[{"__typename":"Team","name":"otto-leases-service-co","slug":"roofstock/otto-leases-service-co"}]'
+    rr="${GH_STUB_REVIEW_REQUESTS:-$default_rr}"
+    reviews='[]'
+    if [ -e "$BATS_TEST_TMPDIR/posted" ]; then
+      rr='[]'
+      reviews='[{"author":{"login":"aleksandr-beliakov-rs"},"state":"COMMENTED","submittedAt":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","commit":{"oid":"dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28"}}]'
+    fi
+    echo '{"state":"'"${GH_STUB_PR_STATE:-OPEN}"'","headRefOid":"dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28","reviews":'"$reviews"',"reviewRequests":'"$rr"',"headRefName":"LRX-9992-branch"}' ;;
   "api repos/roofstock/otto-leases-service/commits/dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28") echo "2026-01-01T00:00:00Z" ;;
+  "api repos/roofstock/otto-leases-service/issues/265/timeline?per_page=100") echo '[]' ;;
+  "api repos/roofstock/otto-leases-service/pulls/265/requested_reviewers")
+    printf '%s\n' "$@" >> "$BATS_TEST_TMPDIR/gh-writes"
+    [ -n "${GH_STUB_REREQUEST_FAIL:-}" ] && { echo "HTTP 502: bad gateway" >&2; exit 1; }
+    echo '{"requested_teams":[{"slug":"otto-leases-service-co"}]}' ;;
   *) echo "unexpected gh call: $*" >&2; exit 1 ;;
 esac
 GH
@@ -97,6 +110,14 @@ write_claude_stub() {  # $1 = "writes" | "silent"
 printf 'GH_CONFIG_DIR=%s\nPATH_HEAD=%s\nGH_RESOLVED=%s\n' "${GH_CONFIG_DIR:-unset}" "${PATH%%:*}" "$(command -v gh)" > "$BATS_TEST_TMPDIR/claude-env"
 mkdir -p "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service"
 printf '=== stub ===\nAction: HOLD\n' >> "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service/265.log"
+CL
+  elif [ "$1" = "posts" ]; then
+    cat > "$PR_REVIEW_POLLER_CLAUDE" <<'CL'
+#!/bin/bash
+{ printf '%s\n' "$@"; echo '--CALL--'; } >> "${BATS_TEST_TMPDIR:?}/claude-argv"
+touch "$BATS_TEST_TMPDIR/posted"
+mkdir -p "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service"
+printf '=== stub ===\nAction: POST 1 comments\n' >> "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service/265.log"
 CL
   elif [ "$1" = "attempts-write" ]; then
     # Simulates a triage session that decides APPROVE and tries to submit it:
@@ -374,11 +395,90 @@ CSV
   grep -q "write attempt denied rc=86" "$BATS_TEST_TMPDIR/claude-denials"
 }
 
+triage_prompt() {
+  sed -n '/^-p$/{n;p;}' "$BATS_TEST_TMPDIR/claude-argv"
+}
+
+@test "a default tick hands the triage --post" {
+  write_claude_stub writes
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$(triage_prompt)" == *" --post "* ]]
+}
+
+@test "--no-post keeps --post away from the triage" {
+  write_claude_stub writes
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0 --no-post
+  [ "$status" -eq 0 ]
+  [ -n "$(triage_prompt)" ]
+  [[ "$(triage_prompt)" != *"--post"* ]]
+}
+
+@test "head mode without --post hands iTerm no --post, because it records no team requests" {
+  write_claude_stub silent
+  write_osascript_shim
+  run "$SCRIPT_UNDER_TEST" run --head
+  [ "$status" -eq 0 ]
+  grep -q 'write text' "$BATS_TEST_TMPDIR/osa-script"
+  ! grep -q -- "--post" "$BATS_TEST_TMPDIR/osa-script" || false
+}
+
+@test "verify mode never hands the triage --post" {
+  write_claude_stub writes
+  run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [ -n "$(triage_prompt)" ]
+  [[ "$(triage_prompt)" != *"--post"* ]]
+}
+
 @test "verify mode refuses --post and --head" {
   run "$SCRIPT_UNDER_TEST" run --verify --post
   [ "$status" -eq 2 ]
   run "$SCRIPT_UNDER_TEST" run --verify --head
   [ "$status" -eq 2 ]
+}
+
+team_requests_key_present() {
+  [ "$(jq 'has("roofstock/otto-leases-service#265")' "$PR_REVIEW_POLLER_STATE_DIR/team-requests.json")" = "true" ]
+}
+
+@test "a tick whose triage posts re-requests the team the post removed" {
+  write_claude_stub posts
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  grep -qxF -- "team_reviewers[]=otto-leases-service-co" "$BATS_TEST_TMPDIR/gh-writes"
+  [[ "$output" == *"re-requested review from team otto-leases-service-co on roofstock/otto-leases-service#265"* ]]
+  ! team_requests_key_present || false
+}
+
+@test "a tick whose triage holds re-requests nothing" {
+  write_claude_stub writes
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [ ! -e "$BATS_TEST_TMPDIR/gh-writes" ]
+  [ -f "$PR_REVIEW_POLLER_STATE_DIR/team-requests.json" ]
+  ! team_requests_key_present || false
+}
+
+@test "a failed re-request is retried on the next tick even when no PR survives" {
+  write_claude_stub posts
+  GH_STUB_REREQUEST_FAIL=1 run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [[ "$output" == *"ERROR: re-request of team otto-leases-service-co on roofstock/otto-leases-service#265 failed"* ]]
+  team_requests_key_present
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already reviewed at HEAD"* ]]
+  [[ "$output" == *"re-requested review from team otto-leases-service-co on roofstock/otto-leases-service#265"* ]]
+  ! team_requests_key_present || false
+}
+
+@test "a record failure runs the triage without --post" {
+  write_claude_stub writes
+  echo 'not json' > "$PR_REVIEW_POLLER_STATE_DIR/team-requests.json"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [[ "$output" == *"WARN: could not record team requests in $PR_REVIEW_POLLER_STATE_DIR/team-requests.json; this tick's triage runs without --post"* ]]
+  [ -n "$(triage_prompt)" ]
+  [[ "$(triage_prompt)" != *"--post"* ]]
 }
 
 @test "a non-executable PR_REVIEW_POLLER_CLAUDE falls back to the default and says so" {
@@ -512,4 +612,14 @@ CSV
   [[ "$output" == *"poll done"* ]]
   assert_triage_flags --append-system-prompt-file "$BATS_TEST_TMPDIR/role home/GenericWorker/role.lane.md" --settings "$BATS_TEST_TMPDIR/role-settings/0123456789abcdef.json" --model "$STUB_REVIEW_MODEL" --effort medium
   assert_every_call_pinned
+}
+
+@test "under the launchd /bin/bash 3.2 a posting tick re-requests the team" {
+  write_claude_stub posts
+  run /bin/bash "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"poll done"* ]]
+  [[ "$(triage_prompt)" == *" --post "* ]]
+  grep -qxF -- "team_reviewers[]=otto-leases-service-co" "$BATS_TEST_TMPDIR/gh-writes"
+  ! team_requests_key_present || false
 }
