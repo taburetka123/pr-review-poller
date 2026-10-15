@@ -46,6 +46,8 @@ case "$1 $2" in
     echo '{"state":"'"${GH_STUB_PR_STATE:-OPEN}"'","headRefOid":"dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28","reviews":'"$reviews"',"reviewRequests":'"$rr"',"headRefName":"LRX-9992-branch"}' ;;
   "api repos/roofstock/otto-leases-service/commits/dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28") echo "2026-01-01T00:00:00Z" ;;
   "api repos/roofstock/otto-leases-service/issues/265/timeline?per_page=100") echo '[]' ;;
+  "api orgs/roofstock/teams/otto-leases-service-co/memberships/aleksandr-beliakov-rs") echo '{"state":"active","role":"member"}' ;;
+  "api orgs/roofstock/teams/otto-leases-service-co/members?per_page=100") echo '[{"login":"aleksandr-beliakov-rs"}]' ;;
   "api repos/roofstock/otto-leases-service/pulls/265/requested_reviewers")
     printf '%s\n' "$@" >> "$BATS_TEST_TMPDIR/gh-writes"
     [ -n "${GH_STUB_REREQUEST_FAIL:-}" ] && { echo "HTTP 502: bad gateway" >&2; exit 1; }
@@ -225,7 +227,7 @@ OSA
   [[ "$output" != *"launching"* ]]
   [ ! -e "$RUN_ALL_INPUT" ]
   [ ! -e "$BATS_TEST_TMPDIR/claude-argv" ]
-  run "$SCRIPT_UNDER_TEST" run --head --post
+  run "$SCRIPT_UNDER_TEST" run --head
   [ "$status" -eq 1 ]
   [ ! -e "$BATS_TEST_TMPDIR/osa-script" ]
 }

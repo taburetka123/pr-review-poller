@@ -593,10 +593,8 @@ resolve_owned_csv() {
 # everything this tick, with a DISTINCT reason on stdout per failure arm:
 # unavailable map / unparseable shape / a -co-less team name / zero matches.
 OWNED_REPOS=""
-OWNED_TEAMS=""
 derive_owned_repos() {
   OWNED_REPOS=""
-  OWNED_TEAMS=""
   if [[ -z "${OWNED_CSV_FILE:-}" || ! -f "$OWNED_CSV_FILE" ]]; then
     echo "code-owner map unavailable (no fetch, no cached or on-disk copy)"
     return 1
@@ -634,7 +632,6 @@ derive_owned_repos() {
     repo="${team%-co}"
     OWNED_REPOS="$OWNED_REPOS$repo"$'\n'
   done <<<"$teams"
-  OWNED_TEAMS="$teams"
   return 0
 }
 
@@ -831,8 +828,8 @@ filter_prs() {
     fi
 
     local team_requests
-    if ! team_requests=$(owned_team_requests "$info"); then
-      echo "  skip #$number ($owner/$repo): could not parse reviewRequests"
+    if ! team_requests=$(owned_team_requests "$info" "$owner" "$me"); then
+      echo "  skip #$number ($owner/$repo): could not read its requested teams or his membership in them"
       continue
     fi
 
@@ -934,24 +931,16 @@ pin_held_to_admitted_head() {
   return 0
 }
 
-team_members() {
-  [[ -n "${OWNED_CSV_FILE:-}" && -f "$OWNED_CSV_FILE" ]] || return 0
-  awk -F'","' -v t="$1" '
-    NR == 1 { next }
-    {
-      team = $1; sub(/^"/, "", team)
-      member = $3; sub(/"$/, "", member)
-      if (team == t) print member
-    }' "$OWNED_CSV_FILE"
-}
-
 owned_team_requests() {
-  local slugs slug out=""
-  slugs=$(printf '%s' "$1" | jq -r '(.reviewRequests // [])[] | select(.__typename == "Team") | .slug | sub("^[^/]*/"; "")' 2>/dev/null) || return 1
+  local info="$1" org="$2" me="$3" slugs slug out="" resp state
+  slugs=$(printf '%s' "$info" | jq -r '(.reviewRequests // [])[] | select(.__typename == "Team") | .slug | sub("^[^/]*/"; "")' 2>/dev/null) || return 1
   while IFS= read -r slug; do
     [[ -z "$slug" ]] && continue
-    if printf '%s\n' "$OWNED_TEAMS" | grep -qxF -- "$slug"; then
-      out="${out:+$out,}$slug"
+    if resp=$(gh api "orgs/$org/teams/$slug/memberships/$me" 2>&1); then
+      state=$(printf '%s' "$resp" | jq -r '.state // empty' 2>/dev/null) || return 1
+      [[ "$state" == "active" ]] && out="${out:+$out,}$slug"
+    elif [[ "$resp" != *"HTTP 404"* ]]; then
+      return 1
     fi
   done <<<"$slugs"
   printf '%s\n' "$out"
@@ -1021,7 +1010,12 @@ restore_team_requests() {
     timeline=""
     while IFS= read -r team; do
       [[ -z "$team" ]] && continue
-      members=$(team_members "$team" | jq -R -s 'split("\n") | map(select(length > 0))') || members='[]'
+      if ! members=$(gh api "orgs/$o/teams/$team/members?per_page=100" --paginate 2>&1) \
+         || ! members=$(printf '%s' "$members" | jq -s -c '[add // [] | .[] | .login]' 2>/dev/null); then
+        echo "[$(date -Iseconds)] WARN: could not read the members of team $team on $key; retrying next tick"
+        kept="$kept$team"$'\n'
+        continue
+      fi
       if ! verdict=$(printf '%s' "$info" | jq -r --arg t "$team" --arg me "$me" --arg since "$since" --argjson members "$members" '
           ($since | fromdateiso8601) as $s
           | (.author.login // "") as $author

@@ -6,13 +6,8 @@ TEAM="otto-leases-service-co"
 
 setup() {
   source_script
-  OWNED_CSV_FILE="$BATS_TEST_TMPDIR/code-owners.csv"
-  cat > "$OWNED_CSV_FILE" <<'CSV'
-"Team","Pod","Member"
-"otto-leases-service-co","Property Services (RTM)","aleksandr-beliakov-rs"
-"otto-leases-service-co","Property Services (RTM)","colleague-rs"
-"otto-other-service-co","Property Services (RTM)","someone-else-rs"
-CSV
+  printf '%s\n' "$ME" colleague-rs > "$BATS_TEST_TMPDIR/members-$TEAM"
+  printf '%s\n' someone-else-rs > "$BATS_TEST_TMPDIR/members-otto-other-service-co"
   F="$BATS_TEST_TMPDIR/team-requests.json"
 
   mkdir -p "$BATS_TEST_TMPDIR/bin"
@@ -30,6 +25,22 @@ case "$1 $2" in
     printf '%s\n' "$@" >> "$D/gh-writes"
     [ -e "$D/api-fail" ] && { echo "HTTP 422: Reviews may only be requested from collaborators" >&2; exit 1; }
     if [ -f "$D/rr-response.json" ]; then cat "$D/rr-response.json"; else echo '{"requested_teams":[{"slug":"otto-leases-service-co"}]}'; fi ;;
+  "api orgs/roofstock/teams/"*)
+    rest="${2#orgs/roofstock/teams/}"
+    slug="${rest%%/*}"
+    case "${rest#*/}" in
+      memberships/*)
+        [ -e "$D/membership-fail" ] && { echo "HTTP 502: bad gateway" >&2; exit 1; }
+        if [ -f "$D/members-$slug" ] && grep -qxF "${rest##*/}" "$D/members-$slug"; then
+          echo '{"state":"active","role":"member"}'
+        else
+          echo "gh: Not Found (HTTP 404)" >&2; exit 1
+        fi ;;
+      "members?per_page=100")
+        [ -e "$D/members-fail" ] && { echo "HTTP 502: bad gateway" >&2; exit 1; }
+        if [ -f "$D/members-$slug" ]; then jq -R -s -c 'split("\n") | map(select(length > 0) | {login: .})' "$D/members-$slug"; else echo '[]'; fi ;;
+      *) echo "unexpected gh call: $*" >&2; exit 1 ;;
+    esac ;;
   *) echo "unexpected gh call: $*" >&2; exit 1 ;;
 esac
 GH
@@ -308,29 +319,45 @@ wrote_rerequest() {
   no_writes
 }
 
-@test "team_members lists the map's members of one team" {
-  run team_members "$TEAM"
-  [ "$status" -eq 0 ]
-  [ "$output" = "$(printf '%s\n%s' "$ME" colleague-rs)" ]
-}
-
 @test "a requested team he is not a member of is never recorded" {
-  OWNED_TEAMS="$TEAM"
-  run owned_team_requests '{"reviewRequests":[{"__typename":"Team","slug":"roofstock/ai-code-review"},{"__typename":"Team","slug":"roofstock/otto-leases-service-co"},{"__typename":"User","login":"u"}]}'
+  run owned_team_requests '{"reviewRequests":[{"__typename":"Team","slug":"roofstock/ai-code-review"},{"__typename":"Team","slug":"roofstock/otto-leases-service-co"},{"__typename":"User","login":"u"}]}' roofstock "$ME"
   [ "$status" -eq 0 ]
   [ "$output" = "$TEAM" ]
-  run owned_team_requests '{"reviewRequests":[{"__typename":"Team","slug":"roofstock/ai-code-review"}]}'
+  run owned_team_requests '{"reviewRequests":[{"__typename":"Team","slug":"roofstock/ai-code-review"}]}' roofstock "$ME"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  run owned_team_requests 'not json'
+  run owned_team_requests 'not json' roofstock "$ME"
+  [ "$status" -eq 1 ]
+}
+
+@test "a pod team outside the code-owner map is recorded when GitHub says he is a member" {
+  printf '%s\n' "$ME" > "$BATS_TEST_TMPDIR/members-otto-resident-experience"
+  run owned_team_requests '{"reviewRequests":[{"__typename":"Team","slug":"roofstock/otto-resident-experience"}]}' roofstock "$ME"
+  [ "$status" -eq 0 ]
+  [ "$output" = "otto-resident-experience" ]
+}
+
+@test "an unreadable team membership fails the read, so the PR waits for the next tick" {
+  touch "$BATS_TEST_TMPDIR/membership-fail"
+  run owned_team_requests '{"reviewRequests":[{"__typename":"Team","slug":"roofstock/otto-leases-service-co"}]}' roofstock "$ME"
   [ "$status" -eq 1 ]
 }
 
 @test "a pr view without reviewRequests yields no team" {
-  OWNED_TEAMS="$TEAM"
-  run owned_team_requests '{"state":"OPEN"}'
+  run owned_team_requests '{"state":"OPEN"}' roofstock "$ME"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
+}
+
+@test "an unreadable member list keeps the entry" {
+  write_entry
+  touch "$BATS_TEST_TMPDIR/members-fail"
+  pr_view OPEN '[]' "[$(his_comment)]"
+  run restore_team_requests "$F" "$ME" 0
+  [ "$status" -eq 0 ]
+  no_writes
+  key_present
+  [[ "$output" == *"WARN: could not read the members of team $TEAM on $KEY"* ]]
 }
 
 survivor() {
