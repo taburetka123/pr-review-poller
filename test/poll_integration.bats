@@ -289,8 +289,10 @@ OSA
   write_claude_stub writes
   export GH_STUB_REVIEW_REQUESTS='[{"__typename":"Team","slug":"roofstock/ai-code-review"}]'
   run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 1 ]
   [[ "$output" == *"skip #265 (roofstock/otto-leases-service): requests him neither by name nor through a team GitHub lists him in"* ]]
+  [[ "$output" == *"poll FAILED — 1 PR(s) request him only through teams GitHub does not list him in"* ]]
+  [[ "$output" != *"poll done"* ]]
   [[ "$output" != *"launching"* ]]
 }
 
@@ -355,6 +357,20 @@ CSV
   [[ "$output" != *"poll done"* ]]
   [[ "$output" != *"no PRs survived filters"* ]]
   [[ "$output" != *"launching"* ]]
+}
+
+@test "a failed code-owner map still lets the tick-start pass re-request a pending team" {
+  write_claude_stub writes
+  touch "$BATS_TEST_TMPDIR/posted"
+  jq -n '{"roofstock/otto-leases-service#265": {teams: ["otto-leases-service-co"], since: "2026-01-01T00:00:00Z", pr_url: "https://github.com/roofstock/otto-leases-service/pull/265"}}' > "$PR_REVIEW_POLLER_STATE_DIR/team-requests.json"
+  cat > "$PR_REVIEW_OWNED_CSV" <<'CSV'
+"Team","Pod","Member"
+"otto-leases-service-co","Property Services (RTM)","somebody-else-rs"
+CSV
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"poll FAILED — domain gate unavailable"* ]]
+  grep -qxF -- "team_reviewers[]=otto-leases-service-co" "$BATS_TEST_TMPDIR/gh-writes"
 }
 
 @test "a healthy empty queue still exits 0 with poll done (the gate-failure branch must not overreach)" {

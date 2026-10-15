@@ -669,10 +669,12 @@ repo_owned() {
 # Prints "  skip #N: <reason>" log lines to stdout so the poller log captures them.
 FILTER_SURVIVORS=()
 FILTER_TEAMS=()
+MEMBERSHIP_BLIND_SKIPS=0
 OWNED_GATE_FAILED=0
 filter_prs() {
   FILTER_SURVIVORS=()
   FILTER_TEAMS=()
+  MEMBERSHIP_BLIND_SKIPS=0
   local me="$WORK_GH_USER"
   local ledger="$LEDGER_FILE"
   local now_epoch; now_epoch=$(date +%s)
@@ -834,6 +836,7 @@ filter_prs() {
     fi
     if [[ -z "$team_requests" ]] && printf '%s' "$info" | jq -e --arg me "$me" '(.reviewRequests // []) | any(.__typename == "Team") and (any(.login == $me) | not)' >/dev/null 2>&1; then
       echo "  skip #$number ($owner/$repo): requests him neither by name nor through a team GitHub lists him in"
+      MEMBERSHIP_BLIND_SKIPS=$((MEMBERSHIP_BLIND_SKIPS + 1))
       continue
     fi
 
@@ -1273,9 +1276,7 @@ OSA
     OWNED_GATE_FAILED=1
   fi
   rm -f "$owned_out"
-  if [[ "$OWNED_GATE_FAILED" == "0" ]]; then
-    restore_team_requests "$TEAM_REQUESTS_FILE" "$WORK_GH_USER" "$VERIFY"
-  fi
+  restore_team_requests "$TEAM_REQUESTS_FILE" "$WORK_GH_USER" "$VERIFY"
 
   if ! filter_prs; then
     echo "[$(date -Iseconds)] filter failed, skipping tick"
@@ -1290,6 +1291,15 @@ OSA
   if [[ "$OWNED_GATE_FAILED" == "1" ]]; then
     echo "[$(date -Iseconds)] poll FAILED — domain gate unavailable, every PR skipped this tick (see the ERROR above); nothing was reviewed"
     exit 1
+  fi
+
+  if [[ "$MEMBERSHIP_BLIND_SKIPS" -gt 0 ]]; then
+    local _blind="$MEMBERSHIP_BLIND_SKIPS PR(s) request him only through teams GitHub does not list him in; check that the work account's gh token carries read:org"
+    if [[ ${#FILTER_SURVIVORS[@]} -eq 0 ]]; then
+      echo "[$(date -Iseconds)] poll FAILED — $_blind; nothing was reviewed"
+      exit 1
+    fi
+    echo "[$(date -Iseconds)] WARN: $_blind"
   fi
 
   if [[ ${#FILTER_SURVIVORS[@]} -eq 0 ]]; then
