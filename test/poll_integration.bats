@@ -197,14 +197,13 @@ OSA
 @test "head mode hands iTerm a claude command pinned to the resolved model" {
   write_claude_stub silent
   write_osascript_shim
-  run "$SCRIPT_UNDER_TEST" run --head --post
+  run "$SCRIPT_UNDER_TEST" run --head
   [ "$status" -eq 0 ]
   local cmd
   cmd=$(sed -n 's/^[[:space:]]*write text "\(.*\)"$/\1/p' "$BATS_TEST_TMPDIR/osa-script")
   [ -n "$cmd" ]
   bash -c "${cmd//\\\"/\"}"
   assert_every_call_pinned
-  grep -q -- "--post" "$BATS_TEST_TMPDIR/claude-argv"
 }
 
 @test "an unresolvable review model fails the run before anything launches, in both modes" {
@@ -429,6 +428,12 @@ triage_prompt() {
   [ "$status" -eq 0 ]
   [ -n "$(triage_prompt)" ]
   [[ "$(triage_prompt)" != *"--post"* ]]
+}
+
+@test "head mode refuses --post, because it records no team requests" {
+  run "$SCRIPT_UNDER_TEST" run --head --post
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--head"* ]]
 }
 
 @test "verify mode refuses --post and --head" {

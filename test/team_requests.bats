@@ -43,8 +43,8 @@ write_entry() {
 }
 
 pr_view() {
-  jq -n --arg state "$1" --argjson rr "$2" --argjson reviews "$3" \
-    '{state: $state, reviewRequests: $rr, reviews: $reviews}' > "$BATS_TEST_TMPDIR/pr-view.json"
+  jq -n --arg state "$1" --argjson rr "$2" --argjson reviews "$3" --arg author "${4:-pr-author-rs}" \
+    '{state: $state, author: {login: $author}, reviewRequests: $rr, reviews: $reviews}' > "$BATS_TEST_TMPDIR/pr-view.json"
 }
 
 review() {
@@ -119,6 +119,33 @@ wrote_rerequest() {
 @test "a team another member's review removed first is left alone" {
   write_entry
   pr_view OPEN '[]' "[$(review colleague-rs COMMENTED 2026-10-15T10:10:00Z),$(his_comment)]"
+  run restore_team_requests "$F" "$ME" 0
+  [ "$status" -eq 0 ]
+  no_writes
+  ! key_present || false
+}
+
+@test "the PR author's own comment does not count as the team's review" {
+  write_entry
+  pr_view OPEN '[]' "[$(review colleague-rs COMMENTED 2026-10-15T10:10:00Z),$(his_comment)]" colleague-rs
+  run restore_team_requests "$F" "$ME" 0
+  [ "$status" -eq 0 ]
+  wrote_rerequest
+  ! key_present || false
+}
+
+@test "an approve after his comment settles the entry without a write" {
+  write_entry
+  pr_view OPEN '[]' "[$(his_comment),$(review "$ME" APPROVED 2026-10-15T10:40:00Z)]"
+  run restore_team_requests "$F" "$ME" 0
+  [ "$status" -eq 0 ]
+  no_writes
+  ! key_present || false
+}
+
+@test "a member's approve after his comment settles the entry without a write" {
+  write_entry
+  pr_view OPEN '[]' "[$(his_comment),$(review colleague-rs APPROVED 2026-10-15T10:40:00Z)]"
   run restore_team_requests "$F" "$ME" 0
   [ "$status" -eq 0 ]
   no_writes

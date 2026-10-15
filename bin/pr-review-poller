@@ -153,7 +153,7 @@ Usage:
                                      nothing; APPROVE still approves. Default
                                      posts, except under --verify and --head
   pr-review-poller run --post        Post (the default). Incompatible with
-                                     --verify
+                                     --verify and --head
   pr-review-poller logs [-n N]       Tail the stdout log (follow mode)
   pr-review-poller findings          List recent PR-findings logs (mtime sort)
   pr-review-poller findings <pr>     Print findings log for a PR. <pr> is a
@@ -1004,7 +1004,7 @@ restore_team_requests() {
     r="${_rest%%#*}"; n="${_rest#*#}"
     since=$(jq -r --arg k "$key" '.[$k].since // empty' "$file" 2>/dev/null) || since=""
     teams=$(jq -r --arg k "$key" '(.[$k].teams // [])[]' "$file" 2>/dev/null) || teams=""
-    if ! info=$(gh pr view "$n" -R "$o/$r" --json state,reviewRequests,reviews 2>&1); then
+    if ! info=$(gh pr view "$n" -R "$o/$r" --json state,author,reviewRequests,reviews 2>&1); then
       echo "[$(date -Iseconds)] WARN: could not read review requests of $key ($info); retrying next tick"
       continue
     fi
@@ -1024,15 +1024,19 @@ restore_team_requests() {
       members=$(team_members "$team" | jq -R -s 'split("\n") | map(select(length > 0))') || members='[]'
       if ! verdict=$(printf '%s' "$info" | jq -r --arg t "$team" --arg me "$me" --arg since "$since" --argjson members "$members" '
           ($since | fromdateiso8601) as $s
+          | (.author.login // "") as $author
           | if [(.reviewRequests // [])[] | select(.__typename == "Team") | .slug | sub("^[^/]*/"; "")] | any(. == $t) then "requested"
             else
               [(.reviews // [])[]
                 | select(.submittedAt != null)
                 | select((.submittedAt | fromdateiso8601) >= $s)
+                | select(.author.login != $author)
                 | select(.author.login as $l | $members | any(. == $l))]
               | sort_by(.submittedAt | fromdateiso8601)
-              | first as $r
-              | if $r != null and $r.author.login == $me and $r.state == "COMMENTED" then "due" else "settled" end
+              | if any(.state == "APPROVED") then "settled"
+                else first as $r
+                  | if $r != null and $r.author.login == $me and $r.state == "COMMENTED" then "due" else "settled" end
+                end
             end' 2>/dev/null); then
         echo "[$(date -Iseconds)] WARN: could not judge team $team on $key from its reviews; retrying next tick"
         kept="$kept$team"$'\n'
@@ -1134,6 +1138,10 @@ cmd_run() {
     echo "--verify does not compose with --head (head mode is the legacy in-session path)" >&2
     exit 2
   fi
+  if [[ "$MODE" == "head" && "$POST" == "1" ]]; then
+    echo "--post does not compose with --head (head mode records no team requests, so a post there drops the team for good)" >&2
+    exit 2
+  fi
   if [[ -z "$POST" ]]; then
     if [[ "$VERIFY" == "1" || "$MODE" == "head" ]]; then POST=0; else POST=1; fi
   fi
@@ -1142,7 +1150,6 @@ cmd_run() {
   SLASH="/kezoo-review-prs --auto --min-commit-age ${MIN_COMMIT_AGE}"
 
   if [[ "$MODE" == "head" ]]; then
-    [[ "$POST" == "1" ]] && SLASH="$SLASH --post"
     resolve_claude
     osascript <<OSA
 tell application "iTerm"
