@@ -2,18 +2,18 @@ load test_helper
 
 setup() { source_script; }
 
-@test "build_review_specs emits repo/pr/branch/slug/since per survivor" {
+@test "build_review_specs emits repo/pr/branch/slug/head/since per survivor" {
   local s1=$'roofstock\totto-leases-service\t265\tdc2354f\tLRX-9992-branch\tabc1234\thttps://github.com/roofstock/otto-leases-service/pull/265'
   run build_review_specs "$s1"
   [ "$status" -eq 0 ]
-  [ "$output" = $'otto-leases-service\t265\tLRX-9992-branch\troofstock/otto-leases-service\tabc1234' ]
+  [ "$output" = $'otto-leases-service\t265\tLRX-9992-branch\troofstock/otto-leases-service\thead=dc2354f\tabc1234' ]
 }
 
 @test "build_review_specs keeps empty since field (first review)" {
   local s1=$'roofstock\totto-leases-service\t265\tdc2354f\tLRX-9992-branch\t\thttps://github.com/roofstock/otto-leases-service/pull/265'
   run build_review_specs "$s1"
   [ "$status" -eq 0 ]
-  [ "$output" = $'otto-leases-service\t265\tLRX-9992-branch\troofstock/otto-leases-service\t' ]
+  [ "$output" = $'otto-leases-service\t265\tLRX-9992-branch\troofstock/otto-leases-service\thead=dc2354f\t' ]
 }
 
 @test "build_review_specs emits one line per survivor" {
