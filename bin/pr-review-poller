@@ -852,8 +852,6 @@ filter_prs() {
     ] | @tsv')
 }
 
-# One pr-review-run-all spec line per survivor:
-#   <repo>\t<pr>\t<branch>\t<owner/repo>\t<since-commit-or-empty>
 # Splits by parameter expansion, not `IFS=$'\t' read`: bash classifies tab as
 # "IFS whitespace" and collapses consecutive occurrences even when IFS is set
 # to tab alone, so `read` silently drops the empty my_last_oid field (position
@@ -870,7 +868,7 @@ build_review_specs() {
     head_ref="${rest%%$'\t'*}"; rest="${rest#*$'\t'}"
     my_last="${rest%%$'\t'*}";  rest="${rest#*$'\t'}"
     url="$rest"
-    printf '%s\t%s\t%s\t%s/%s\t%s\n' "$repo" "$number" "$head_ref" "$owner" "$repo" "$my_last"
+    printf '%s\t%s\t%s\t%s/%s\thead=%s\t%s\n' "$repo" "$number" "$head_ref" "$owner" "$repo" "$head_oid" "$my_last"
   done
 }
 

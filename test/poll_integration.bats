@@ -90,7 +90,7 @@ DW
   cat > "$PR_REVIEW_RUN_ALL" <<'RA'
 #!/bin/bash
 mkdir -p "${PR_REVIEW_RESULT_DIR:?}"
-tee "${RUN_ALL_INPUT:?}" | while IFS=$'\t' read -r repo pr branch slug since; do
+tee "${RUN_ALL_INPUT:?}" | while IFS=$'\t' read -r repo pr branch slug head since; do
   [ -z "$pr" ] && continue
   printf 'Status: ok\nComplexity: 2\n## Findings\nNo findings.\n' > "$PR_REVIEW_RESULT_DIR/$pr.md"
 done
@@ -317,7 +317,7 @@ OSA
   [[ "$output" == *"launching 1 reviewer(s)"* ]]
   [[ "$output" == *"--reviews-pre-run"* ]]
   # The exact spec line that reached run-all (field-shift guard at the seam):
-  [ "$(cat "$RUN_ALL_INPUT")" = $'otto-leases-service\t265\tLRX-9992-branch\troofstock/otto-leases-service\t' ]
+  [ "$(cat "$RUN_ALL_INPUT")" = $'otto-leases-service\t265\tLRX-9992-branch\troofstock/otto-leases-service\thead=dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28\t' ]
   # And the argv claude was ACTUALLY invoked with (not just the log echo):
   grep -q -- "--reviews-pre-run" "$BATS_TEST_TMPDIR/claude-argv"
   # Model pin at the act level (Tier-2 finding 1 + delta findings E/F):
