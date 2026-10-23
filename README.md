@@ -8,7 +8,7 @@ Pairs with the `--auto` mode on the personal `/kezoo-review-prs` skill — which
 
 Three possible actions:
 
-- **POST** — leave each finding as a **standalone inline PR comment** (not wrapped in a review submission) so the timeline gets per-comment "commented on" entries instead of a "reviewed changes" block. Every body is footer-tagged `*Automated review*` so humans can tell the source. Used for every `blocker` and `major` finding, at any confidence, for every author. A POST also sends the review to your Slack channel.
+- **POST** — leave each finding as a **standalone inline PR comment** (not wrapped in a review submission) so the timeline gets per-comment "commented on" entries instead of a "reviewed changes" block. Every body ends with a hidden `<!-- kezoo-review -->` marker, which the hold check reads to skip the poller's own comments. Used for every `blocker` and `major` finding, at any confidence, for every author. A POST also sends the review to your Slack channel.
 - **HOLD** — submit no review. Record the PR in a local ledger (`~/.local/state/pr-review-poller/held.json`) and DM yourself on Slack with the full review so you can decide. The PR is skipped on subsequent polls (until new commits) so you aren't spammed. A HOLD for the author, the PR complexity or a prior-reviewer concern still posts its blocker and major findings as comments. The hold reason never goes to GitHub.
 - **APPROVE** — submit an `APPROVE` review with an empty body. No text, no noise.
 
