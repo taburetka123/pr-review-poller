@@ -1,34 +1,37 @@
 # pr-review-poller
 
-Background launchd job that runs `claude -p "/kezoo-review-prs --auto"` on a timer so teammate PRs get reviewed without you at the keyboard.
+Background launchd job that runs `claude -p "/kezoo-review-prs --auto"` on a timer so PRs by the roster, and by any author in the team's pod repos, get reviewed without you at the keyboard.
 
-Pairs with the `--auto` mode on the personal `/kezoo-review-prs` skill — which posts every blocker and major finding, holds or approves otherwise, and drops minor and nit findings.
+Pairs with the `--auto` mode on the personal `/kezoo-review-prs` skill — which posts every finding the reviewer did not dispute, and approves when none is blocker or major.
 
 ## What auto mode does per PR
 
-Three possible actions:
+Four possible actions:
 
-- **POST** — leave each finding as a **standalone inline PR comment** (not wrapped in a review submission) so the timeline gets per-comment "commented on" entries instead of a "reviewed changes" block. Every body ends with a hidden `<!-- kezoo-review -->` marker, which the hold check reads to skip the poller's own comments. Used for every `blocker` and `major` finding, at any confidence, for every author. A POST also sends the review to your Slack channel.
-- **HOLD** — submit no review. Record the PR in a local ledger (`~/.local/state/pr-review-poller/held.json`) and DM yourself on Slack with the full review so you can decide. The PR is skipped on subsequent polls (until new commits) so you aren't spammed. A HOLD for the author, the PR complexity or a prior-reviewer concern still posts its blocker and major findings as comments. The hold reason never goes to GitHub.
-- **APPROVE** — submit an `APPROVE` review with an empty body. No text, no noise.
+- **POST** — leave each finding as a **standalone inline PR comment** (not wrapped in a review submission) so the timeline gets per-comment "commented on" entries instead of a "reviewed changes" block. Every body ends with a hidden `<!-- kezoo-review -->` marker, which the hold check reads to skip the poller's own comments. Used when the post set holds a blocker or major; every finding in the post set posts, at any severity and confidence. A POST also sends the review to your Slack channel.
+- **HOLD** — submit no review. Record the PR in a local ledger (`~/.local/state/pr-review-poller/held.json`) and DM yourself on Slack with the full review so you can decide. The PR is skipped on subsequent polls (until new commits) so you aren't spammed. A HOLD for a prior-reviewer concern or a disputed finding still posts its post set. The hold reason never goes to GitHub.
+- **POST + APPROVE** — when the post set holds only minor and nit findings: one `APPROVE` review on the reviewed commit that carries the line comments inside it and any file-level or out-of-diff finding in its body, which then ends with the hidden marker. All of it lands or none of it does; a rejected call is a HOLD.
+- **APPROVE** — submit an `APPROVE` review with an empty body when there is nothing to post. No text, no noise.
 
 GitHub drops a requested team once a member reviews, so a posted comment removes your team from the PR. After the triage, and on later ticks until it settles, the poller re-requests review from that team (`~/.local/state/pr-review-poller/team-requests.json`). It re-requests nothing after an APPROVE.
 
-Trust is per-author and expressed as the **maximum PR complexity (1–5) we'll let the bot act on without a human**. The reviewing subagent rates each PR's complexity 1–5; if `complexity > author trust`, the action is HOLD — the PR goes to a Slack DM for human review, and its blocker and major findings still post. The complexity gate is a prerequisite for approval: only once it passes do we decide POST (any `blocker`/`major`) vs APPROVE. Full matrix lives in the `/kezoo-review-prs` skill.
-
 ## Safety gates
 
-Five layered checks prevent duplicate reviews, mid-push reviews, and beating humans to the draw. **All five run in the shell script before Claude is invoked** — on a tick where every PR is filtered out (the common case), no Claude session starts at all, so empty ticks cost nothing:
+Seven layered checks prevent duplicate reviews, mid-push reviews, reviews of other teams' PRs, and beating humans to the draw. **All seven run in the shell script before Claude is invoked** — on a tick where every PR is filtered out (the common case), no Claude session starts at all, so empty ticks cost nothing:
 
 1. **Single-flight lock** — PID file at `~/.local/state/pr-review-poller.lock`. If a previous poll is still running, the new one exits; stale locks (process gone) are reclaimed.
 2. **Last-review-commit dedup** — the skill's Phase 1 skips any PR where your last review was on the current head commit. Re-review runs only when the head has moved.
 3. **Already-approved skip** — if any reviewer's latest review state is `APPROVED`, the skill skips the PR in auto mode. No piling on with comments after someone greenlit it.
 4. **Commit-age gate** — a PR is only reviewed once its newest commit is ≥ `MIN_COMMIT_AGE` old (default 10 min). Gives humans a lead window and avoids reviewing mid-push.
 5. **Held-ledger skip** — a PR currently marked HOLD at the current HEAD is skipped. When new commits land (HEAD moves), the entry goes stale and the PR is re-evaluated.
+6. **Author gate** — a roster author is admitted wherever your login is a code owner. Any other author is admitted only when the repo's `Pod` in engineering-pods `config/repositories-config.csv` is `Otto - Leasing` or `Otto - Resident Experience` (the set follows the team the `roofstock-environment.md` project rule names). An empty pod, a repo with no row, or no map skips the PR with the reason in the log; when the map is unavailable the tick warns and goes on with the roster.
+7. **Reviewed-by search** — a second search, `--reviewed-by=@me`, finds PRs whose approve a push dismissed (GitHub does not restore the review request). From it the poller takes only PRs with a record in `~/.local/state/pr-review-poller/reviewed.json`, written when the poller admits a PR; such a PR is reviewed again at its new head. Before the first tick that writes the record there is nothing to find: re-trigger an already dismissed PR by hand with `run --force` after re-requesting the review. A PR the poller admitted and you then reviewed by hand returns to the poller after the next push. A record that cannot be written is a `poll FAILED`, retried on the next hourly tick.
 
 - `INFLIGHT_TTL` (default `1h`): how long an `[in-flight]` placeholder may persist
   before a new run treats it as orphaned (from a crashed/interrupted run) and
-  re-reviews the PR. Real holds (findings/complexity verdicts) are unaffected.
+  re-reviews the PR. Real holds (findings verdicts) are unaffected.
+
+The frequency gate is stamped with the tick's start time only after `poll done`; it passes 300 s early. A `poll FAILED` tick leaves no stamp, releases its own `[in-flight]` entries and shows a macOS notification, so the next hourly tick retries.
 
 ## Install
 
@@ -55,7 +58,7 @@ pr-review-poller start        # begin polling (launchctl load)
 pr-review-poller start --no-post   # begin polling, never post (any later start with flags drops it)
 pr-review-poller stop         # pause polling (launchctl unload)
 pr-review-poller run          # run one cycle right now (headless, respects lock)
-pr-review-poller run --head   # run one cycle in a new iTerm2 tab, no lock (debug)
+pr-review-poller run --head   # debug of the skill only; with no PR URLs the triage reviews nothing
 pr-review-poller logs         # tail -F the stdout log
 pr-review-poller config       # print the config file
 pr-review-poller help

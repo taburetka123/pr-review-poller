@@ -124,7 +124,8 @@ Usage:
                                      poller-side reviewer launch, no in-flight
                                      pre-write, no findings assertion — and
                                      >10-min reviews still die at the harness
-                                     600s ceiling. Debug of the skill only
+                                     600s ceiling. Debug of the skill only;
+                                     with no PR URLs the triage reviews nothing
   pr-review-poller run --min-commit-age DUR
                                      Override the commit-age gate for this run
   pr-review-poller run --frequency DUR
