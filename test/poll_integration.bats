@@ -265,7 +265,7 @@ OSA
   [ ! -e "$BATS_TEST_TMPDIR/claude-argv" ]
   run "$SCRIPT_UNDER_TEST" run --head
   [ "$status" -eq 1 ]
-  [ ! -e "$BATS_TEST_TMPDIR/osa-script" ]
+  [ ! -s "$BATS_TEST_TMPDIR/osa-script" ]
 }
 
 @test "a dockwright that exits nonzero fails the run with the poller's own line" {
@@ -308,16 +308,17 @@ OSA
   write_claude_stub records-then-dies
   run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
   [ "$status" -eq 1 ]
-  [[ "$output" == *"claude triage exited rc=1; 0 PR(s) remain in-flight"* ]]
+  [[ "$output" == *"claude triage exited rc=1; 0 PR(s) released from in-flight"* ]]
   [[ "$output" == *"1 PR(s) carry the triage's ledger entry"* ]]
 }
 
-@test "a triage that dies before recording anything leaves its PR in-flight" {
+@test "a triage that dies before recording anything releases its PR from in-flight" {
   printf '#!/bin/bash\nexit 1\n' > "$PR_REVIEW_POLLER_CLAUDE"
   chmod +x "$PR_REVIEW_POLLER_CLAUDE"
   run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
   [ "$status" -eq 1 ]
-  [[ "$output" == *"claude triage exited rc=1; 1 PR(s) remain in-flight"* ]]
+  [[ "$output" == *"claude triage exited rc=1; 1 PR(s) released from in-flight"* ]]
+  [ "$(jq -r '."roofstock/otto-leases-service#265" // "gone"' "$PR_REVIEW_POLLER_STATE_DIR/held.json")" = "gone" ]
 }
 
 @test "a PR that requests him neither by name nor through a team GitHub lists him in is skipped" {
@@ -670,20 +671,20 @@ team_requests_key_present() {
   [ ! -e "$PR_REVIEW_POLLER_STATE_DIR/held.json" ] || ! grep -q 'in-flight' "$PR_REVIEW_POLLER_STATE_DIR/held.json"
 }
 
-@test "a role-args refusal that first appears at triage time fails closed with the PRs in flight" {
+@test "a role-args refusal that first appears at triage time fails closed and releases the PRs" {
   write_claude_stub writes
   export STUB_ROLE_ARGS=empty-then-refuse
   run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
   [ "$status" -eq 1 ]
   [ "$(wc -l < "$BATS_TEST_TMPDIR/role-args-calls")" -eq 2 ]
   [ -s "$RUN_ALL_INPUT" ]
-  [[ "$output" == *"poll FAILED — role-args GenericWorker --launch lane refused rc=2 at triage time; nothing was triaged; 1 PR(s) remain in-flight"* ]]
-  [[ "$output" == *"to retry now, fix it, run 'pr-review-poller clear-hold <pr>' for each PR, then 'pr-review-poller run --force'"* ]]
+  [[ "$output" == *"poll FAILED — role-args GenericWorker --launch lane refused rc=2 at triage time; nothing was triaged; 1 PR(s) released from in-flight"* ]]
+  [[ "$output" == *"the next hourly tick retries them, or fix it and 'pr-review-poller run --force' now"* ]]
   [[ "$output" == *"GenericWorker/role.lane.md missing; run"* ]]
   [[ "$output" != *"poll done"* ]]
   [ ! -e "$BATS_TEST_TMPDIR/claude-argv" ]
   [ ! -e "$PR_REVIEW_RESULT_DIR/265.md" ]
-  [[ "$(jq -r '.["roofstock/otto-leases-service#265"].reason' "$PR_REVIEW_POLLER_STATE_DIR/held.json")" == "[in-flight]"* ]]
+  [ "$(jq -r '."roofstock/otto-leases-service#265" // "gone"' "$PR_REVIEW_POLLER_STATE_DIR/held.json")" = "gone" ]
 }
 
 @test "an empty role-args answer launches the triage on today's flags and logs it" {
@@ -771,4 +772,129 @@ team_requests_key_present() {
   [[ "$output" == *"WARN: pods map unavailable — outside authors are skipped this tick (pods map has an unexpected header"* ]]
   [[ "$output" == *"outside author outsider-rs — pods map unavailable, fail closed"* ]]
   [[ "$output" != *"launching"* ]]
+}
+
+PR265='[{"number":265,"title":"t","repository":{"nameWithOwner":"roofstock/otto-leases-service"},"author":{"login":"dmitry-indikeev-rs"}}]'
+PR265SC='[{"number":265,"title":"t","repository":{"nameWithOwner":"roofstock/services-contracts"},"author":{"login":"outsider-rs"}}]'
+
+@test "an admitted PR is recorded in reviewed.json at the pre-write" {
+  write_claude_stub writes
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  jq -e '."roofstock/otto-leases-service#265".pr_url == "https://github.com/roofstock/otto-leases-service/pull/265" and (."roofstock/otto-leases-service#265".since | length > 0)' "$PR_REVIEW_POLLER_STATE_DIR/reviewed.json"
+}
+
+@test "a reviewed.json that cannot be written fails the tick before any reviewer launches" {
+  write_claude_stub writes
+  echo '[]' > "$PR_REVIEW_POLLER_STATE_DIR/reviewed.json"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"poll FAILED — could not record the admitted PRs in"* ]]
+  [[ "$output" == *"1 PR(s) released from in-flight"* ]]
+  [ ! -e "$RUN_ALL_INPUT" ]
+  [ "$(jq -r '."roofstock/otto-leases-service#265" // "gone"' "$PR_REVIEW_POLLER_STATE_DIR/held.json")" = "gone" ]
+  [ ! -f "$PR_REVIEW_POLLER_STATE_DIR/last-run.epoch" ]
+}
+
+@test "a reviewed-by PR without a record is skipped" {
+  write_claude_stub writes
+  export GH_STUB_REQUESTED='[]' GH_STUB_REVIEWED="$PR265"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [[ "$output" == *"skip #265 (roofstock/otto-leases-service): reviewed-by search — not admitted by the poller before"* ]]
+  [[ "$output" != *"launching"* ]]
+}
+
+@test "a recorded reviewed-by PR by an outside author in a shared repo is skipped by the author gate" {
+  write_claude_stub writes
+  export GH_STUB_REQUESTED='[]' GH_STUB_REVIEWED="$PR265SC"
+  jq -n '{"roofstock/services-contracts#265": {pr_url: "https://github.com/roofstock/services-contracts/pull/265", since: "2026-01-01T00:00:00Z"}}' > "$PR_REVIEW_POLLER_STATE_DIR/reviewed.json"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [[ "$output" == *"outside author outsider-rs — pod cell EMPTY"* ]]
+  [[ "$output" != *"launching"* ]]
+}
+
+@test "a recorded reviewed-by PR whose only request is a foreign team is reviewed, not blind-skipped" {
+  write_claude_stub writes
+  export GH_STUB_REQUESTED='[]' GH_STUB_REVIEWED="$PR265"
+  export GH_STUB_REVIEW_REQUESTS='[{"__typename":"Team","name":"ai-code-review","slug":"roofstock/ai-code-review"}]'
+  jq -n '{"roofstock/otto-leases-service#265": {pr_url: "https://github.com/roofstock/otto-leases-service/pull/265", since: "2026-01-01T00:00:00Z"}}' > "$PR_REVIEW_POLLER_STATE_DIR/reviewed.json"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"launching 1 reviewer"* ]]
+  [[ "$output" != *"requests him neither by name"* ]]
+}
+
+@test "a PR in both searches is reviewed once" {
+  write_claude_stub writes
+  export GH_STUB_REVIEWED="$PR265"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [[ "$output" == *"launching 1 reviewer"* ]]
+  [ "$(grep -c '^otto-leases-service' "$RUN_ALL_INPUT")" -eq 1 ]
+}
+
+@test "prune removes the reviewed.json record of a closed PR and keeps an open one" {
+  jq -n '{"roofstock/otto-leases-service#265": {pr_url: "u", since: "s"}, "roofstock/otto-leases-service#266": {pr_url: "u", since: "s"}}' > "$PR_REVIEW_POLLER_STATE_DIR/reviewed.json"
+  export GH_STUB_PR_STATE_266=MERGED
+  run "$SCRIPT_UNDER_TEST" prune
+  [ "$status" -eq 0 ]
+  [ "$(jq -c 'keys' "$PR_REVIEW_POLLER_STATE_DIR/reviewed.json")" = '["roofstock/otto-leases-service#265"]' ]
+  [[ "$output" == *"prune reviewed: deleted=1, kept=1, gh-errors=0"* ]]
+}
+
+@test "a successful tick stamps the tick START, not the end" {
+  write_claude_stub writes
+  export RUN_ALL_SLEEP=2
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  end=$(date +%s)
+  [ "$status" -eq 0 ]
+  stamp=$(cat "$PR_REVIEW_POLLER_STATE_DIR/last-run.epoch")
+  [ "$stamp" -le "$(cat "$BATS_TEST_TMPDIR/run-all-epoch")" ]
+  [ $(( end - stamp )) -ge 2 ]
+}
+
+@test "a failed tick after the pre-write leaves no stamp and drops its own in-flight entry, keeping a real hold" {
+  write_claude_stub silent
+  jq -n '{"roofstock/otto-other-service#1": {commit: "x", held_at: "2026-01-01T00:00:00+00:00", reason: "1 major finding"}}' > "$PR_REVIEW_POLLER_STATE_DIR/held.json"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"findings log(s) missing or stale after triage; their PR(s) released from in-flight; the next hourly tick retries them"* ]]
+  [ ! -f "$PR_REVIEW_POLLER_STATE_DIR/last-run.epoch" ]
+  [ "$(jq -r '."roofstock/otto-leases-service#265" // "gone"' "$PR_REVIEW_POLLER_STATE_DIR/held.json")" = "gone" ]
+  [ "$(jq -r '."roofstock/otto-other-service#1".reason' "$PR_REVIEW_POLLER_STATE_DIR/held.json")" = "1 major finding" ]
+}
+
+@test "a failed tick shows a macOS notification carrying the poll FAILED line" {
+  write_claude_stub silent
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  grep -q -- '-e display notification "poll FAILED — ' "$BATS_TEST_TMPDIR/osascript-calls"
+  grep -q 'with title "pr-review-poller"' "$BATS_TEST_TMPDIR/osascript-calls"
+}
+
+@test "a failed tick before the pre-write notifies, stamps nothing and touches no ledger" {
+  write_claude_stub writes
+  printf '"Team","Pod","Member"\n"otto-leases-service-co","p","somebody-else-rs"\n' > "$PR_REVIEW_OWNED_CSV"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 1 ]
+  [ ! -f "$PR_REVIEW_POLLER_STATE_DIR/last-run.epoch" ]
+  grep -q 'poll FAILED — domain gate unavailable' "$BATS_TEST_TMPDIR/osascript-calls"
+  [ ! -f "$PR_REVIEW_POLLER_STATE_DIR/held.json" ]
+}
+
+@test "the frequency gate passes 300 s early and still skips a young tick" {
+  write_claude_stub writes
+  echo $(( $(date +%s) - 7199 )) > "$PR_REVIEW_POLLER_STATE_DIR/last-run.epoch"
+  run "$SCRIPT_UNDER_TEST" run --min-commit-age 0
+  [[ "$output" == *"launching 1 reviewer"* ]]
+  echo $(( $(date +%s) - 6000 )) > "$PR_REVIEW_POLLER_STATE_DIR/last-run.epoch"
+  run "$SCRIPT_UNDER_TEST" run --min-commit-age 0
+  echo "$output" | grep -E -q 'frequency gate: 600[0-9]s since last tick start, below 7200s − 300s tolerance'
+  [[ "$output" != *"launching"* ]]
+}
+
+@test "a healthy empty queue still stamps the gate" {
+  write_claude_stub writes
+  export GH_STUB_REQUESTED='[]'
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [ -f "$PR_REVIEW_POLLER_STATE_DIR/last-run.epoch" ]
 }

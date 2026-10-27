@@ -11,6 +11,7 @@ setup() {
   WORK_GH_USER="aleksandr-beliakov-rs"
   MIN_COMMIT_AGE="10m"
   LEDGER_FILE="$BATS_TEST_TMPDIR/absent-ledger.json"
+  REVIEWED_FILE="$BATS_TEST_TMPDIR/absent-reviewed.json"
   ALLOWED_EXTRA_REPOS=""
   OWNED_REPOS=$'otto-leases-service\n'
   OWNED_GATE_FAILED=0
@@ -87,16 +88,17 @@ filter() {
   [ "${#FILTER_SURVIVORS[@]}" -eq 0 ]
 }
 
-@test "a search that fills the --limit cap says so in the log" {
+@test "each search that fills the --limit cap says so, by name" {
   export GH_STUB_SEARCH_COUNT=50
   filter
-  grep -q "WARN: gh search returned 50 PRs" "$FILTER_LOG"
+  grep -q "WARN: gh search --review-requested returned 50 PRs" "$FILTER_LOG"
+  grep -q "WARN: gh search --reviewed-by returned 50 PRs" "$FILTER_LOG"
 }
 
 @test "a search under the cap logs no cap warning" {
   export GH_STUB_SEARCH_COUNT=49
   filter
-  ! grep -q "WARN: gh search returned" "$FILTER_LOG" || false
+  ! grep -q "returned 50 PRs" "$FILTER_LOG" || false
 }
 
 @test "a ledger that cannot be written warns and never aborts the pin" {
