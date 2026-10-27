@@ -310,6 +310,7 @@ OSA
   [ "$status" -eq 1 ]
   [[ "$output" == *"claude triage exited rc=1; 0 PR(s) released from in-flight"* ]]
   [[ "$output" == *"1 PR(s) carry the triage's ledger entry"* ]]
+  [ "$(jq -r '."roofstock/otto-leases-service#265".reason' "$PR_REVIEW_POLLER_STATE_DIR/held.json")" = "posting 2 comment(s) did not finish; see the findings log" ]
 }
 
 @test "a triage that dies before recording anything releases its PR from in-flight" {
