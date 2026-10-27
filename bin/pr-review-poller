@@ -22,8 +22,9 @@ CLAUDE="${PR_REVIEW_POLLER_CLAUDE:-$CLAUDE_DEFAULT}"
 RUN_ALL_SCRIPT="${PR_REVIEW_RUN_ALL:-$HOME/.claude/scripts/pr-review-run-all}"
 WORKTREE_SCRIPT="${PR_REVIEW_WORKTREE_SCRIPT:-$HOME/.claude/scripts/pr-review-worktree}"
 # The two map overrides are read from the environment HERE, before load_config
-# sources the user-writable config.env: a line there must not re-point either
-# map (tests set them in the environment).
+# sources config.env, so a PR_REVIEW_*_CSV line there is ignored (tests set
+# them in the environment). config.env is sourced bash and can still redefine
+# anything below; this pins one path, it is not a sandbox.
 OWNED_CSV_OVERRIDE="${PR_REVIEW_OWNED_CSV:-}"
 PODS_CSV_OVERRIDE="${PR_REVIEW_PODS_CSV:-}"
 
@@ -723,8 +724,8 @@ repo_pod_ours() {
   # Owner of this set: claude-project-configs
   # default/.claude/rules/common/roofstock-environment.md ("My team is LRX
   # (LES + RX)"). Change both together. `local` for the same reason as the
-  # roster in filter_prs; the map path is pinned before config.env is sourced
-  # (PODS_CSV_OVERRIDE) for the same reason.
+  # roster in filter_prs; the map path is read before config.env is sourced
+  # (PODS_CSV_OVERRIDE) so a plain assignment there does not re-point it.
   local team_pods=("Otto - Leasing" "Otto - Resident Experience")
   if [[ -z "${PODS_CSV_FILE:-}" || ! -f "$PODS_CSV_FILE" ]]; then
     echo "pods map unavailable"

@@ -900,7 +900,7 @@ PR265SC='[{"number":265,"title":"t","repository":{"nameWithOwner":"roofstock/ser
   [ -f "$PR_REVIEW_POLLER_STATE_DIR/last-run.epoch" ]
 }
 
-@test "a config.env that re-points the pods map cannot admit an outside author in a shared repo" {
+@test "a PR_REVIEW_PODS_CSV line in config.env does not re-point the pods map" {
   write_claude_stub writes
   export GH_STUB_AUTHOR=outsider-rs GH_STUB_REPO=services-contracts
   printf '"GhStatus","Repository","c3","c4","c5","c6","c7","c8","c9","c10","c11","c12","c13","Pod","c15","c16"\n"x","services-contracts","3","4","5","6","7","8","9","10","11","12","13","Otto - Leasing","15","16"\n' > "$BATS_TEST_TMPDIR/forged.csv"
