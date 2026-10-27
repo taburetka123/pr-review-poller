@@ -12,6 +12,7 @@ LAST_RUN_FILE="$STATE_DIR/last-run.epoch"
 LAST_PRUNE_FILE="$STATE_DIR/last-prune.epoch"
 LEDGER_FILE="$STATE_DIR/held.json"
 TEAM_REQUESTS_FILE="$STATE_DIR/team-requests.json"
+REVIEWED_FILE="$STATE_DIR/reviewed.json"
 STDOUT_LOG="$HOME/worktrees/.pr-review-poller-stdout.log"
 STDERR_LOG="$HOME/worktrees/.pr-review-poller-stderr.log"
 FINDINGS_DIR="${PR_REVIEW_FINDINGS_ROOT:-$HOME/worktrees/.pr-review-findings}"
@@ -20,6 +21,12 @@ CLAUDE_DEFAULT="${PR_REVIEW_POLLER_CLAUDE_DEFAULT:-$REAL_CLAUDE}"
 CLAUDE="${PR_REVIEW_POLLER_CLAUDE:-$CLAUDE_DEFAULT}"
 RUN_ALL_SCRIPT="${PR_REVIEW_RUN_ALL:-$HOME/.claude/scripts/pr-review-run-all}"
 WORKTREE_SCRIPT="${PR_REVIEW_WORKTREE_SCRIPT:-$HOME/.claude/scripts/pr-review-worktree}"
+# The two map overrides are read from the environment HERE, before load_config
+# sources config.env, so a PR_REVIEW_*_CSV line there is ignored (tests set
+# them in the environment). config.env is sourced bash and can still redefine
+# anything below; this pins one path, it is not a sandbox.
+OWNED_CSV_OVERRIDE="${PR_REVIEW_OWNED_CSV:-}"
+PODS_CSV_OVERRIDE="${PR_REVIEW_PODS_CSV:-}"
 
 load_config() {
   if [[ -f "$CONFIG_FILE" ]]; then
@@ -36,6 +43,8 @@ load_config() {
   # team that are nevertheless reviewed: services-contracts is the live case
   # (no `<repo>-co` team exists for it, yet it carries real review requests).
   # |-separated; config.env overrides it with a one-line edit.
+  # Outside authors pass a second gate, the repo's pod (repo_pod_ours);
+  # ALLOWED_EXTRA_REPOS admits a repo for the roster only.
   ALLOWED_EXTRA_REPOS="${ALLOWED_EXTRA_REPOS:-services-contracts}"
 }
 
@@ -58,7 +67,9 @@ resolve_review_model() {
   local rc=0
   REVIEW_MODEL="$(dockwright model resolve '@opus')" || rc=$?
   if [[ "$rc" -ne 0 || -z "$REVIEW_MODEL" ]]; then
-    echo "[$(date -Iseconds)] poll FAILED — dockwright model resolve '@opus' exited rc=$rc with '${REVIEW_MODEL}'; nothing was reviewed; put a current dockwright on PATH"
+    local failed="poll FAILED — dockwright model resolve '@opus' exited rc=$rc with '${REVIEW_MODEL}'; nothing was reviewed; put a current dockwright on PATH"
+    echo "[$(date -Iseconds)] $failed"
+    notify_failure "$failed"
     exit 1
   fi
 }
@@ -119,7 +130,8 @@ Usage:
                                      poller-side reviewer launch, no in-flight
                                      pre-write, no findings assertion — and
                                      >10-min reviews still die at the harness
-                                     600s ceiling. Debug of the skill only
+                                     600s ceiling. Debug of the skill only;
+                                     with no PR URLs the triage reviews nothing
   pr-review-poller run --min-commit-age DUR
                                      Override the commit-age gate for this run
   pr-review-poller run --frequency DUR
@@ -296,6 +308,7 @@ prune_findings() {
       return 0
     fi
   fi
+  prune_reviewed "$REVIEWED_FILE"
   if [[ ! -d "$FINDINGS_DIR" ]]; then
     return 0
   fi
@@ -549,11 +562,11 @@ SSH_EOF
 # checkout sits on — it is routinely parked on feature branches); falls back to
 # the working-tree copy with a logged warning; leaves the path missing when
 # neither resolves, which derive_owned_repos treats as fail-closed.
-# PR_REVIEW_OWNED_CSV overrides everything (tests).
+# PR_REVIEW_OWNED_CSV in the environment at script start overrides everything (tests).
 OWNED_CSV_FILE=""
 resolve_owned_csv() {
-  if [[ -n "${PR_REVIEW_OWNED_CSV:-}" ]]; then
-    OWNED_CSV_FILE="$PR_REVIEW_OWNED_CSV"
+  if [[ -n "${OWNED_CSV_OVERRIDE:-}" ]]; then
+    OWNED_CSV_FILE="$OWNED_CSV_OVERRIDE"
     return 0
   fi
   local pods_repo="$HOME/projects/work/engineering-pods"
@@ -576,13 +589,10 @@ resolve_owned_csv() {
 # every `<repo>-co` team $WORK_GH_USER belongs to IS a repo it reviews, because
 # that membership is what generates the review requests in the first place.
 #
-# Why not the pod columns (the gate this replaces): pod data was wrong in BOTH
-# directions for this purpose — repo pod-ownership admitted
-# otto-business-process-service ("Otto - Core", the 2026-07-27 incident repo,
-# which this login does not own), while pod MEMBERSHIP (team-member.csv) lists
-# the engineer under otto-property-services + otto-resident-experience and omits
-# otto-leasing outright. Code ownership is the signal that actually drives
-# review requests, so it is the one the gate keys on.
+# Why not the pod columns: a repo's pod does not replace the code-owner gate
+# (repo pod-ownership once admitted otto-business-process-service, the
+# 2026-07-27 incident repo, which this login does not own). For outside authors
+# the pod IS the second gate: repo_pod_ours.
 #
 # Identity: this map's `Member` column holds GITHUB LOGINS (verified: zero rows
 # contain "@"), and the poller already knows its own login as $WORK_GH_USER —
@@ -663,6 +673,84 @@ repo_owned() {
   return 1
 }
 
+# Resolve the freshest repositories map into PODS_CSV_FILE, the same way
+# resolve_owned_csv resolves the code-owner map. PR_REVIEW_PODS_CSV in the
+# environment at script start overrides everything (tests). rc 0 always; a
+# missing path fails check_pods_header.
+PODS_CSV_FILE=""
+resolve_pods_csv() {
+  if [[ -n "${PODS_CSV_OVERRIDE:-}" ]]; then
+    PODS_CSV_FILE="$PODS_CSV_OVERRIDE"
+    return 0
+  fi
+  local pods_repo="$HOME/projects/work/engineering-pods"
+  local cache="$STATE_DIR/pods-map.csv"
+  mkdir -p "$STATE_DIR"
+  if git -C "$pods_repo" fetch origin main --quiet 2>/dev/null \
+     && git -C "$pods_repo" show origin/main:config/repositories-config.csv > "$cache" 2>/dev/null; then
+    PODS_CSV_FILE="$cache"
+    return 0
+  fi
+  if [[ -f "$pods_repo/config/repositories-config.csv" ]]; then
+    echo "[$(date -Iseconds)] WARNING: pods-map fetch from origin/main failed — using the on-disk working-tree copy (may be stale)"
+    PODS_CSV_FILE="$pods_repo/config/repositories-config.csv"
+    return 0
+  fi
+  PODS_CSV_FILE="$cache.missing"
+}
+
+# rc 0 when the pods map's header carries Repository in field 2 and Pod in
+# field 14; rc 1 with the reason on stdout otherwise. cmd_run stores the result
+# in PODS_GATE_FAILED, as it does OWNED_GATE_FAILED for the code-owner map.
+check_pods_header() {
+  if [[ -z "${PODS_CSV_FILE:-}" || ! -f "$PODS_CSV_FILE" ]]; then
+    echo "pods map unavailable (no fetch, no cached or on-disk copy)"
+    return 1
+  fi
+  local fields
+  fields=$(awk -F'","' 'NR == 1 { r = $2; sub(/^"/, "", r); p = $14; sub(/"$/, "", p); print r "\t" p; exit }' "$PODS_CSV_FILE")
+  local repo_field="${fields%%$'\t'*}" pod_field="${fields#*$'\t'}"
+  if [[ "$repo_field" != "Repository" || "$pod_field" != "Pod" ]]; then
+    echo "pods map has an unexpected header (field 2 '$repo_field', field 14 '$pod_field')"
+    return 1
+  fi
+  return 0
+}
+
+# Second gate for an OUTSIDE author: is <repo>'s pod one of the team's pods?
+# rc 0 = admitted, rc 1 = refused; the reason on stdout goes into the log line.
+repo_pod_ours() {
+  local repo="$1"
+  # Owner of this set: claude-project-configs
+  # default/.claude/rules/common/roofstock-environment.md ("My team is LRX
+  # (LES + RX)"). Change both together. `local` for the same reason as the
+  # roster in filter_prs; the map path is read before config.env is sourced
+  # (PODS_CSV_OVERRIDE) so a plain assignment there does not re-point it.
+  local team_pods=("Otto - Leasing" "Otto - Resident Experience")
+  if [[ -z "${PODS_CSV_FILE:-}" || ! -f "$PODS_CSV_FILE" ]]; then
+    echo "pods map unavailable"
+    return 1
+  fi
+  local pod
+  if ! pod=$(awk -F'","' -v r="$repo" '$2 == r { p = $14; sub(/"$/, "", p); print p; found = 1; exit } END { exit found ? 0 : 1 }' "$PODS_CSV_FILE"); then
+    echo "repo ABSENT from the pods map"
+    return 1
+  fi
+  if [[ -z "$pod" ]]; then
+    echo "pod cell EMPTY — outside authors are never reviewed here"
+    return 1
+  fi
+  local t
+  for t in "${team_pods[@]}"; do
+    if [[ "$t" == "$pod" ]]; then
+      echo "pod $pod (team pod)"
+      return 0
+    fi
+  done
+  echo "pod '$pod' is not a team pod"
+  return 1
+}
+
 # Phase 1 discovery + filtering. Same logic as ~/.claude/skills/kezoo-review-prs/SKILL.md
 # Phase 1, pulled into bash so empty/all-skipped ticks don't burn Claude tokens.
 # Writes surviving PR URLs into the FILTER_SURVIVORS array (caller reads it).
@@ -671,6 +759,7 @@ FILTER_SURVIVORS=()
 FILTER_TEAMS=()
 MEMBERSHIP_BLIND_SKIPS=0
 OWNED_GATE_FAILED=0
+PODS_GATE_FAILED=0
 filter_prs() {
   FILTER_SURVIVORS=()
   FILTER_TEAMS=()
@@ -684,7 +773,8 @@ filter_prs() {
   }
 
   # Mirrors the team-members list in ~/.claude/skills/kezoo-review-prs/SKILL.md.
-  # Keep in sync when the skill's team changes.
+  # Keep in sync when the skill's team changes. The roster now tells a teammate
+  # from an outside author; outside authors pass only through repo_pod_ours.
   #
   # Deliberately `local`, not a top-level array: load_config sources the
   # user-writable config.env, so a script-scope roster would be an
@@ -692,30 +782,71 @@ filter_prs() {
   # Re-declaring it per call makes that override structurally impossible.
   local team=(aleksandr-beliakov-rs dmitry-indikeev-rs alejandro-gomez-rs alexander-grigorov-rs vadim-kostenko-rs rustem-zhunussov-rs)
 
-  local raw search_limit=50
-  if ! raw=$(gh search prs --review-requested=@me --state=open --draft=false --limit="$search_limit" \
+  # Two searches: PRs that request his review, and PRs he already reviewed. A
+  # push dismisses an approve without restoring the request, so a dismissed PR
+  # is found only by the second search; from it the poller takes only PRs it
+  # admitted before and recorded in $REVIEWED_FILE.
+  local raw raw_requested raw_reviewed search_limit=50
+  if ! raw_requested=$(gh search prs --review-requested=@me --state=open --draft=false --limit="$search_limit" \
       --json number,title,repository,author 2>&1); then
-    echo "gh search failed: $raw" >&2
+    echo "gh search failed: $raw_requested" >&2
     return 1
   fi
-  if [[ -z "$raw" || "$raw" == "[]" ]]; then
+  if ! raw_reviewed=$(gh search prs --reviewed-by=@me --state=open --draft=false --limit="$search_limit" \
+      --json number,title,repository,author 2>&1); then
+    echo "gh search failed: $raw_reviewed" >&2
+    return 1
+  fi
+  [[ -z "$raw_requested" ]] && raw_requested='[]'
+  [[ -z "$raw_reviewed" ]] && raw_reviewed='[]'
+  if [[ "$raw_requested" == "[]" && "$raw_reviewed" == "[]" ]]; then
     return 0
   fi
-  if [[ "$(echo "$raw" | jq 'length')" -ge "$search_limit" ]]; then
-    echo "  WARN: gh search returned $search_limit PRs, the --limit cap; PRs past it are not considered this tick"
+  if [[ "$(echo "$raw_requested" | jq 'length')" -ge "$search_limit" ]]; then
+    echo "  WARN: gh search --review-requested returned $search_limit PRs, the --limit cap; PRs past it are not considered this tick"
+  fi
+  if [[ "$(echo "$raw_reviewed" | jq 'length')" -ge "$search_limit" ]]; then
+    echo "  WARN: gh search --reviewed-by returned $search_limit PRs, the --limit cap; PRs past it are not considered this tick"
+  fi
+  if ! raw=$(jq -n --argjson a "$raw_requested" --argjson b "$raw_reviewed" '
+      ($a | map(. + {via_requested: 1, via_reviewed: 0})) + ($b | map(. + {via_requested: 0, via_reviewed: 1}))
+      | group_by(.repository.nameWithOwner + "#" + (.number | tostring))
+      | map({number: .[0].number, title: .[0].title, repository: .[0].repository, author: .[0].author,
+             via_requested: (map(.via_requested) | max), via_reviewed: (map(.via_reviewed) | max)})' 2>&1); then
+    echo "gh search results could not be merged: $raw" >&2
+    return 1
   fi
 
-  while IFS=$'\t' read -r owner repo number author; do
+  while IFS=$'\t' read -r owner repo number author via_requested via_reviewed; do
     [[ -z "$number" ]] && continue
 
-    # 1. Team-author filter
+    # 0. A PR found only by the reviewed-by search needs the poller's own record.
+    if [[ "$via_requested" != "1" ]]; then
+      if [[ ! -f "$REVIEWED_FILE" ]] || ! jq -e --arg key "$owner/$repo#$number" 'has($key)' "$REVIEWED_FILE" >/dev/null 2>&1; then
+        echo "  skip #$number ($owner/$repo): reviewed-by search — not admitted by the poller before"
+        continue
+      fi
+    fi
+
+    # 1. Author gate: a teammate is admitted wherever the login is a code
+    # owner; an outside author only in a repo whose pod is a team pod.
     local in_team=0
     for t in "${team[@]}"; do
       [[ "$t" == "$author" ]] && { in_team=1; break; }
     done
-    if [[ "$in_team" == "0" ]]; then
-      echo "  skip #$number ($owner/$repo): author $author not on team"
+    if [[ "$in_team" == "1" ]]; then
+      echo "  admit #$number ($owner/$repo): author $author on team"
+    elif [[ "$PODS_GATE_FAILED" == "1" ]]; then
+      echo "  skip #$number ($owner/$repo): outside author $author — pods map unavailable, fail closed"
       continue
+    else
+      local pod_reason
+      if pod_reason=$(repo_pod_ours "$repo"); then
+        echo "  admit #$number ($owner/$repo): outside author $author — $pod_reason"
+      else
+        echo "  skip #$number ($owner/$repo): outside author $author — $pod_reason"
+        continue
+      fi
     fi
 
     # 2. Repo-cloned check — CAPABILITY: can this machine review it at all.
@@ -834,7 +965,9 @@ filter_prs() {
       echo "  skip #$number ($owner/$repo): could not read its requested teams or his membership in them"
       continue
     fi
-    if [[ -z "$team_requests" ]] && printf '%s' "$info" | jq -e --arg me "$me" '(.reviewRequests // []) | any(.__typename == "Team") and (any(.login == $me) | not)' >/dev/null 2>&1; then
+    # A PR the reviewed-by search returned already consumed its request: the
+    # membership-blind skip does not apply to it.
+    if [[ -z "$team_requests" && "$via_reviewed" != "1" ]] && printf '%s' "$info" | jq -e --arg me "$me" '(.reviewRequests // []) | any(.__typename == "Team") and (any(.login == $me) | not)' >/dev/null 2>&1; then
       echo "  skip #$number ($owner/$repo): requests him neither by name nor through a team GitHub lists him in"
       MEMBERSHIP_BLIND_SKIPS=$((MEMBERSHIP_BLIND_SKIPS + 1))
       continue
@@ -848,7 +981,9 @@ filter_prs() {
       (.repository.nameWithOwner | split("/")[0]),
       (.repository.nameWithOwner | split("/")[1]),
       (.number | tostring),
-      .author.login
+      (.author.login // "unknown"),
+      (.via_requested | tostring),
+      (.via_reviewed | tostring)
     ] | @tsv')
 }
 
@@ -983,6 +1118,107 @@ record_team_requests() {
   return 0
 }
 
+# Record every admitted PR in $REVIEWED_FILE so the reviewed-by search admits it
+# again after a push dismissed the approve. rc 1 with the reason on stdout when
+# the file cannot be read as an object or written.
+record_reviewed() {
+  local file="$1" since="$2" survivor _rest _o _r _n _url updates="" tmp cur='{}'
+  [[ ${#FILTER_SURVIVORS[@]} -eq 0 ]] && return 0
+  if [[ -f "$file" ]]; then
+    cur=$(cat "$file" 2>/dev/null) || { echo "cannot read $file"; return 1; }
+    printf '%s' "$cur" | jq -e 'type == "object"' >/dev/null 2>&1 || { echo "$file is not a JSON object"; return 1; }
+  fi
+  for survivor in "${FILTER_SURVIVORS[@]}"; do
+    _rest="$survivor"
+    _o="${_rest%%$'\t'*}"; _rest="${_rest#*$'\t'}"
+    _r="${_rest%%$'\t'*}"; _rest="${_rest#*$'\t'}"
+    _n="${_rest%%$'\t'*}"
+    _url="${survivor##*$'\t'}"
+    updates="$updates$_o/$_r#$_n"$'\t'"$_url"$'\n'
+  done
+  mkdir -p "$(dirname "$file")" 2>/dev/null || { echo "cannot write $file"; return 1; }
+  tmp=$(mktemp "$file.XXXXXX" 2>/dev/null) || { echo "cannot write $file"; return 1; }
+  if ! printf '%s' "$updates" | jq -R -s --arg since "$since" --argjson cur "$cur" '
+      reduce (split("\n")[] | select(length > 0) | split("\t")) as $u ($cur;
+        .[$u[0]] = {pr_url: $u[1], since: (.[$u[0]].since // $since)})' > "$tmp" 2>/dev/null \
+     || ! mv "$tmp" "$file" 2>/dev/null; then
+    rm -f "$tmp"
+    echo "cannot write $file"
+    return 1
+  fi
+  return 0
+}
+
+# Drop the $REVIEWED_FILE records of PRs that are MERGED or CLOSED. An OPEN PR
+# and a PR gh cannot read stay. Silent when the file is absent.
+prune_reviewed() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  local keys key _rest o r n state deleted=0 kept=0 errors=0 drop=()
+  if ! keys=$(jq -r 'keys[]' "$file" 2>/dev/null); then
+    echo "[$(date -Iseconds)] WARN: could not read $file; nothing pruned from it"
+    return 0
+  fi
+  while IFS= read -r key; do
+    [[ -z "$key" ]] && continue
+    o="${key%%/*}"; _rest="${key#*/}"
+    r="${_rest%%#*}"; n="${_rest#*#}"
+    if state=$(gh pr view "$n" -R "$o/$r" --json state -q .state 2>/dev/null); then
+      case "$state" in
+        MERGED|CLOSED) drop+=("$key"); deleted=$((deleted+1)) ;;
+        *) kept=$((kept+1)) ;;
+      esac
+    else
+      errors=$((errors+1))
+    fi
+  done <<<"$keys"
+  if [[ ${#drop[@]} -gt 0 ]]; then
+    local keys_json tmp
+    keys_json=$(printf '%s\n' "${drop[@]}" | jq -R . | jq -s 'map([.])')
+    tmp=$(mktemp "$file.XXXXXX" 2>/dev/null) || { echo "[$(date -Iseconds)] WARN: could not update $file"; return 0; }
+    if ! { jq --argjson drop "$keys_json" 'delpaths($drop)' "$file" > "$tmp" 2>/dev/null && mv "$tmp" "$file" 2>/dev/null; }; then
+      rm -f "$tmp"
+      echo "[$(date -Iseconds)] WARN: could not update $file"
+      return 0
+    fi
+  fi
+  echo "[$(date -Iseconds)] prune reviewed: deleted=$deleted, kept=$kept, gh-errors=$errors"
+}
+
+# Drop the "[in-flight]" ledger entries of the given survivors so the next tick
+# retries them. Real holds stay. rc 0 always.
+release_inflight() {
+  [[ -f "$LEDGER_FILE" ]] || return 0
+  local survivor _rest _o _r _n key reason keys=() keys_json tmp
+  for survivor in "$@"; do
+    _rest="$survivor"
+    _o="${_rest%%$'\t'*}"; _rest="${_rest#*$'\t'}"
+    _r="${_rest%%$'\t'*}"; _rest="${_rest#*$'\t'}"
+    _n="${_rest%%$'\t'*}"
+    key="$_o/$_r#$_n"
+    reason=$(jq -r --arg key "$key" '.[$key].reason // empty' "$LEDGER_FILE" 2>/dev/null) || reason=""
+    [[ "$reason" == \[in-flight\]* ]] && keys+=("$key")
+  done
+  [[ ${#keys[@]} -eq 0 ]] && return 0
+  keys_json=$(printf '%s\n' "${keys[@]}" | jq -R . | jq -s 'map([.])')
+  tmp=$(mktemp)
+  if ! { jq --argjson drop "$keys_json" 'delpaths($drop)' "$LEDGER_FILE" > "$tmp" 2>/dev/null && mv "$tmp" "$LEDGER_FILE" 2>/dev/null; }; then
+    rm -f "$tmp"
+    echo "  WARN: could not release the in-flight entries from $LEDGER_FILE"
+  fi
+  return 0
+}
+
+# Show a macOS notification with the poll FAILED line. rc 0 always.
+notify_failure() {
+  local text="${1:0:200}"
+  text="${text//\\/\\\\}"
+  text="${text//\"/\\\"}"
+  osascript -e "display notification \"$text\" with title \"pr-review-poller\"" </dev/null >/dev/null 2>&1 \
+    || echo "[$(date -Iseconds)] WARN: macOS notification failed" >&2
+  return 0
+}
+
 restore_team_requests() {
   local file="$1" me="$2" verify="$3"
   [[ -f "$file" ]] || return 0
@@ -1113,6 +1349,7 @@ cleanup_dispatched() {
 
 cmd_run() {
   load_config
+  local TICK_START
   MODE="headless"
   POST=""
   FORCE=0
@@ -1214,6 +1451,7 @@ OSA
     echo "[$(date -Iseconds)] VERIFY MODE: no GitHub write on any gh / git / MCP path this tick (gh guard denies writes AND the whole auth branch — no credential handout; no MCP servers in claude sessions; push-blocked git/ssh). NOT airtight — named residuals: (1) raw HTTP clients (curl/python3/node/perl) cannot be allowlisted away, so a credential obtained by other means still reaches api.github.com; (2) the account-routing gh wrapper invoked by ABSOLUTE path bypasses this guard and reads the macOS keyring, which no env var gates; (3) the Keychain directly — 'security find-generic-password -s gh:github.com -w' returns the token in ONE command, touching no gh, no git, no MCP. Guard log: $VERIFY_GUARD_LOG"
   fi
 
+  TICK_START=$(date +%s)
   echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE, frequency=$REVIEW_FREQUENCY, post=$POST, verify=$VERIFY, cwd=$WORK_CWD, gh_user=$WORK_GH_USER)"
 
   # Daily housekeeping: drop findings logs for PRs that are no longer open.
@@ -1222,8 +1460,11 @@ OSA
 
   # Frequency gate: launchd fires hourly so a post-sleep wake catches up
   # immediately, but we only do real work once per REVIEW_FREQUENCY window.
-  # Stamp on gate-pass (not on claude success) so a claude rate-limit doesn't
-  # cause hourly retries — the in-flight ledger already protects per-PR.
+  # Stamp only after a tick that reached `poll done`, with the tick's START
+  # time. A failed tick is retried by the next hourly launchd tick (its
+  # in-flight entries are released at each `poll FAILED` exit); the hourly
+  # cadence caps retries under a persistent failure. The start time keeps a
+  # long tick from pushing the next one past the 300 s tolerance.
   # --force (manual override) bypasses the gate.
   if [[ "$FORCE" != "1" ]]; then
     local freq_seconds; freq_seconds=$(duration_to_seconds "$REVIEW_FREQUENCY") || {
@@ -1233,9 +1474,9 @@ OSA
     if [[ -f "$LAST_RUN_FILE" ]]; then
       local last_epoch elapsed
       last_epoch=$(cat "$LAST_RUN_FILE" 2>/dev/null || echo 0)
-      elapsed=$(( $(date +%s) - last_epoch ))
-      if [[ "$elapsed" -lt "$freq_seconds" ]]; then
-        echo "[$(date -Iseconds)] frequency gate: ${elapsed}s since last run, below ${freq_seconds}s threshold ($REVIEW_FREQUENCY) — skipping tick (use --force to override)"
+      elapsed=$(( TICK_START - last_epoch ))
+      if [[ "$elapsed" -lt $(( freq_seconds > 300 ? freq_seconds - 300 : 0 )) ]]; then
+        echo "[$(date -Iseconds)] frequency gate: ${elapsed}s since last tick start, below ${freq_seconds}s − 300s tolerance ($REVIEW_FREQUENCY) — skipping tick (use --force to override)"
         exit 0
       fi
     fi
@@ -1243,11 +1484,11 @@ OSA
   local role_rc=0
   dockwright role-args GenericWorker --launch lane >/dev/null || role_rc=$?
   if [[ "$role_rc" -ne 0 ]]; then
-    echo "[$(date -Iseconds)] poll FAILED — role-args GenericWorker --launch lane refused rc=$role_rc; nothing was reviewed, no PR was claimed and the frequency gate was not stamped; run 'dockwright role-args GenericWorker --launch lane' to see why"
+    local _failed="poll FAILED — role-args GenericWorker --launch lane refused rc=$role_rc; nothing was reviewed, no PR was claimed and the frequency gate was not stamped; run 'dockwright role-args GenericWorker --launch lane' to see why"
+    echo "[$(date -Iseconds)] $_failed"
+    notify_failure "$_failed"
     exit 1
   fi
-  mkdir -p "$(dirname "$LAST_RUN_FILE")"
-  date +%s > "$LAST_RUN_FILE"
 
   # Expire abandoned "[in-flight]" placeholders before filtering. The PID lock is
   # held here, so any surviving placeholder is orphaned from a dead run; filter
@@ -1274,6 +1515,17 @@ OSA
     OWNED_GATE_FAILED=1
   fi
   rm -f "$owned_out"
+  # Author gate input for outside authors: the repositories map. A missing or
+  # reshaped map skips every outside author this tick and lets the roster through.
+  PODS_GATE_FAILED=0
+  resolve_pods_csv
+  local pods_out
+  pods_out=$(mktemp)
+  if ! check_pods_header > "$pods_out"; then
+    echo "[$(date -Iseconds)] WARN: pods map unavailable — outside authors are skipped this tick ($(cat "$pods_out"))"
+    PODS_GATE_FAILED=1
+  fi
+  rm -f "$pods_out"
   restore_team_requests "$TEAM_REQUESTS_FILE" "$WORK_GH_USER" "$VERIFY"
 
   if ! filter_prs; then
@@ -1286,15 +1538,20 @@ OSA
   # reads exactly these terminal lines. Same contract as the findings
   # assertion — a tick that reviewed nothing because something broke never
   # says "poll done" (the 189-silent-ticks shape, different cause).
+  local _failed
   if [[ "$OWNED_GATE_FAILED" == "1" ]]; then
-    echo "[$(date -Iseconds)] poll FAILED — domain gate unavailable, every PR skipped this tick (see the ERROR above); nothing was reviewed"
+    _failed="poll FAILED — domain gate unavailable, every PR skipped this tick (see the ERROR above); nothing was reviewed"
+    echo "[$(date -Iseconds)] $_failed"
+    notify_failure "$_failed"
     exit 1
   fi
 
   if [[ "$MEMBERSHIP_BLIND_SKIPS" -gt 0 ]]; then
     local _blind="$MEMBERSHIP_BLIND_SKIPS PR(s) request him only through teams GitHub does not list him in; check that the work account's gh token carries read:org"
     if [[ ${#FILTER_SURVIVORS[@]} -eq 0 ]]; then
-      echo "[$(date -Iseconds)] poll FAILED — $_blind; nothing was reviewed"
+      _failed="poll FAILED — $_blind; nothing was reviewed"
+      echo "[$(date -Iseconds)] $_failed"
+      notify_failure "$_failed"
       exit 1
     fi
     echo "[$(date -Iseconds)] WARN: $_blind"
@@ -1302,16 +1559,18 @@ OSA
 
   if [[ ${#FILTER_SURVIVORS[@]} -eq 0 ]]; then
     echo "[$(date -Iseconds)] no PRs survived filters, skipping claude invocation"
+    mkdir -p "$(dirname "$LAST_RUN_FILE")"
+    echo "$TICK_START" > "$LAST_RUN_FILE"
     echo "[$(date -Iseconds)] poll done"
     exit 0
   fi
 
   # Pre-write an "[in-flight]" ledger entry per survivor BEFORE invoking claude.
   # The skill's HOLD path overwrites with the real entry (same key); POST/APPROVE
-  # deletes it on success. If claude crashes mid-review (rate limit, etc.) the
-  # placeholder persists, so the next tick's filter step 7 skips this exact
-  # (PR, commit) instead of burning another retry. User runs
-  # `pr-review-poller clear-hold <pr>` to force a re-review.
+  # deletes it on success. Every `poll FAILED` exit below releases it so the next
+  # hourly tick retries; a crash that reaches no such exit leaves it, and the
+  # next tick's filter step 7 skips this exact (PR, commit) until INFLIGHT_TTL.
+  # User runs `pr-review-poller clear-hold <pr>` to force a re-review.
   local LEDGER="$LEDGER_FILE"
   mkdir -p "$(dirname "$LEDGER")"
   [[ -f "$LEDGER" ]] || echo '{}' > "$LEDGER"
@@ -1344,6 +1603,18 @@ OSA
     echo "[$(date -Iseconds)] WARN: could not record team requests in $TEAM_REQUESTS_FILE; this tick's triage runs without --post"
     POST=0
   fi
+  local reviewed_out reviewed_rc=0
+  reviewed_out=$(mktemp)
+  record_reviewed "$REVIEWED_FILE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$reviewed_out" || reviewed_rc=$?
+  if [[ "$reviewed_rc" -ne 0 ]]; then
+    _failed="poll FAILED — could not record the admitted PRs in $REVIEWED_FILE ($(cat "$reviewed_out")); nothing was reviewed; ${#FILTER_SURVIVORS[@]} PR(s) released from in-flight; the next hourly tick retries them"
+    rm -f "$reviewed_out"
+    echo "[$(date -Iseconds)] $_failed"
+    release_inflight "${FILTER_SURVIVORS[@]}"
+    notify_failure "$_failed"
+    exit 1
+  fi
+  rm -f "$reviewed_out"
 
   # Run the reviewers HERE, in the poller's own bash, before any claude session
   # exists. History: the skill used to launch pr-review-run-all from inside the
@@ -1359,11 +1630,13 @@ OSA
     rm -f "$PR_REVIEW_RESULT_DIR/$_n.md"
   done
 
-  local TICK_START; TICK_START=$(date +%s)
   echo "[$(date -Iseconds)] launching ${#FILTER_SURVIVORS[@]} reviewer(s) via $RUN_ALL_SCRIPT"
   if ! build_review_specs "${FILTER_SURVIVORS[@]}" | "$RUN_ALL_SCRIPT"; then
-    echo "[$(date -Iseconds)] poll FAILED — pr-review-run-all exited nonzero; ${#FILTER_SURVIVORS[@]} PR(s) remain in-flight, TTL re-queues in $INFLIGHT_TTL, or 'pr-review-poller clear-hold' to retry now"
+    _failed="poll FAILED — pr-review-run-all exited nonzero; ${#FILTER_SURVIVORS[@]} PR(s) released from in-flight; the next hourly tick retries them, or 'pr-review-poller run --force' now"
+    echo "[$(date -Iseconds)] $_failed"
     cleanup_dispatched "${FILTER_SURVIVORS[@]}"
+    release_inflight "${FILTER_SURVIVORS[@]}"
+    notify_failure "$_failed"
     exit 1
   fi
 
@@ -1376,8 +1649,11 @@ OSA
   role_rc=0
   append_role_flags || role_rc=$?
   if [[ "$role_rc" -ne 0 ]]; then
-    echo "[$(date -Iseconds)] poll FAILED — role-args GenericWorker --launch lane refused rc=$role_rc at triage time; nothing was triaged; ${#_pr_urls[@]} PR(s) remain in-flight; run 'dockwright role-args GenericWorker --launch lane' to see why; to retry now, fix it, run 'pr-review-poller clear-hold <pr>' for each PR, then 'pr-review-poller run --force'; otherwise they return on the first tick that passes the $REVIEW_FREQUENCY frequency gate after the $INFLIGHT_TTL in-flight TTL"
+    _failed="poll FAILED — role-args GenericWorker --launch lane refused rc=$role_rc at triage time; nothing was triaged; ${#_pr_urls[@]} PR(s) released from in-flight; run 'dockwright role-args GenericWorker --launch lane' to see why; the next hourly tick retries them, or fix it and 'pr-review-poller run --force' now"
+    echo "[$(date -Iseconds)] $_failed"
     cleanup_dispatched "${FILTER_SURVIVORS[@]}"
+    release_inflight "${FILTER_SURVIVORS[@]}"
+    notify_failure "$_failed"
     exit 1
   fi
   CLAUDE_FLAGS+=(--model "$REVIEW_MODEL" --effort medium)
@@ -1422,13 +1698,21 @@ OSA
         _held=$((_held + 1))
       fi
     done
-    echo "[$(date -Iseconds)] poll FAILED — claude triage exited rc=$rc; $_inflight PR(s) remain in-flight; TTL re-queues in $INFLIGHT_TTL, or 'pr-review-poller clear-hold' to retry now; $_held PR(s) carry the triage's ledger entry ('pr-review-poller status' shows its reason)"
+    _failed="poll FAILED — claude triage exited rc=$rc; $_inflight PR(s) released from in-flight; the next hourly tick retries them, or 'pr-review-poller run --force' now; $_held PR(s) carry the triage's ledger entry ('pr-review-poller status' shows its reason)"
+    echo "[$(date -Iseconds)] $_failed"
+    release_inflight "${FILTER_SURVIVORS[@]}"
+    notify_failure "$_failed"
     exit "$rc"
   fi
   if [[ "$missing" -gt 0 ]]; then
-    echo "[$(date -Iseconds)] poll FAILED — $missing/${#FILTER_SURVIVORS[@]} findings log(s) missing or stale after triage; PR(s) remain in-flight (TTL re-queues in $INFLIGHT_TTL)"
+    _failed="poll FAILED — $missing/${#FILTER_SURVIVORS[@]} findings log(s) missing or stale after triage; their PR(s) released from in-flight; the next hourly tick retries them"
+    echo "[$(date -Iseconds)] $_failed"
+    release_inflight "${FILTER_SURVIVORS[@]}"
+    notify_failure "$_failed"
     exit 1
   fi
+  mkdir -p "$(dirname "$LAST_RUN_FILE")"
+  echo "$TICK_START" > "$LAST_RUN_FILE"
   echo "[$(date -Iseconds)] poll done"
 }
 
