@@ -36,6 +36,8 @@ load_config() {
   # team that are nevertheless reviewed: services-contracts is the live case
   # (no `<repo>-co` team exists for it, yet it carries real review requests).
   # |-separated; config.env overrides it with a one-line edit.
+  # Outside authors pass a second gate, the repo's pod (repo_pod_ours);
+  # ALLOWED_EXTRA_REPOS admits a repo for the roster only.
   ALLOWED_EXTRA_REPOS="${ALLOWED_EXTRA_REPOS:-services-contracts}"
 }
 
@@ -576,13 +578,10 @@ resolve_owned_csv() {
 # every `<repo>-co` team $WORK_GH_USER belongs to IS a repo it reviews, because
 # that membership is what generates the review requests in the first place.
 #
-# Why not the pod columns (the gate this replaces): pod data was wrong in BOTH
-# directions for this purpose — repo pod-ownership admitted
-# otto-business-process-service ("Otto - Core", the 2026-07-27 incident repo,
-# which this login does not own), while pod MEMBERSHIP (team-member.csv) lists
-# the engineer under otto-property-services + otto-resident-experience and omits
-# otto-leasing outright. Code ownership is the signal that actually drives
-# review requests, so it is the one the gate keys on.
+# Why not the pod columns: a repo's pod does not replace the code-owner gate
+# (repo pod-ownership once admitted otto-business-process-service, the
+# 2026-07-27 incident repo, which this login does not own). For outside authors
+# the pod IS the second gate: repo_pod_ours.
 #
 # Identity: this map's `Member` column holds GITHUB LOGINS (verified: zero rows
 # contain "@"), and the poller already knows its own login as $WORK_GH_USER —
@@ -663,6 +662,82 @@ repo_owned() {
   return 1
 }
 
+# Resolve the freshest repositories map into PODS_CSV_FILE, the same way
+# resolve_owned_csv resolves the code-owner map. PR_REVIEW_PODS_CSV overrides
+# everything (tests). rc 0 always; a missing path fails check_pods_header.
+PODS_CSV_FILE=""
+resolve_pods_csv() {
+  if [[ -n "${PR_REVIEW_PODS_CSV:-}" ]]; then
+    PODS_CSV_FILE="$PR_REVIEW_PODS_CSV"
+    return 0
+  fi
+  local pods_repo="$HOME/projects/work/engineering-pods"
+  local cache="$STATE_DIR/pods-map.csv"
+  mkdir -p "$STATE_DIR"
+  if git -C "$pods_repo" fetch origin main --quiet 2>/dev/null \
+     && git -C "$pods_repo" show origin/main:config/repositories-config.csv > "$cache" 2>/dev/null; then
+    PODS_CSV_FILE="$cache"
+    return 0
+  fi
+  if [[ -f "$pods_repo/config/repositories-config.csv" ]]; then
+    echo "[$(date -Iseconds)] WARNING: pods-map fetch from origin/main failed — using the on-disk working-tree copy (may be stale)"
+    PODS_CSV_FILE="$pods_repo/config/repositories-config.csv"
+    return 0
+  fi
+  PODS_CSV_FILE="$cache.missing"
+}
+
+# rc 0 when the pods map's header carries Repository in field 2 and Pod in
+# field 14; rc 1 with the reason on stdout otherwise. cmd_run stores the result
+# in PODS_GATE_FAILED, as it does OWNED_GATE_FAILED for the code-owner map.
+check_pods_header() {
+  if [[ -z "${PODS_CSV_FILE:-}" || ! -f "$PODS_CSV_FILE" ]]; then
+    echo "pods map unavailable (no fetch, no cached or on-disk copy)"
+    return 1
+  fi
+  local fields
+  fields=$(awk -F'","' 'NR == 1 { r = $2; sub(/^"/, "", r); p = $14; sub(/"$/, "", p); print r "\t" p; exit }' "$PODS_CSV_FILE")
+  local repo_field="${fields%%$'\t'*}" pod_field="${fields#*$'\t'}"
+  if [[ "$repo_field" != "Repository" || "$pod_field" != "Pod" ]]; then
+    echo "pods map has an unexpected header (field 2 '$repo_field', field 14 '$pod_field')"
+    return 1
+  fi
+  return 0
+}
+
+# Second gate for an OUTSIDE author: is <repo>'s pod one of the team's pods?
+# rc 0 = admitted, rc 1 = refused; the reason on stdout goes into the log line.
+repo_pod_ours() {
+  local repo="$1"
+  # Owner of this set: claude-project-configs
+  # default/.claude/rules/common/roofstock-environment.md ("My team is LRX
+  # (LES + RX)"). Change both together. `local` for the same reason as the
+  # roster in filter_prs.
+  local team_pods=("Otto - Leasing" "Otto - Resident Experience")
+  if [[ -z "${PODS_CSV_FILE:-}" || ! -f "$PODS_CSV_FILE" ]]; then
+    echo "pods map unavailable"
+    return 1
+  fi
+  local pod
+  if ! pod=$(awk -F'","' -v r="$repo" '$2 == r { p = $14; sub(/"$/, "", p); print p; found = 1; exit } END { exit found ? 0 : 1 }' "$PODS_CSV_FILE"); then
+    echo "repo ABSENT from the pods map"
+    return 1
+  fi
+  if [[ -z "$pod" ]]; then
+    echo "pod cell EMPTY — outside authors are never reviewed here"
+    return 1
+  fi
+  local t
+  for t in "${team_pods[@]}"; do
+    if [[ "$t" == "$pod" ]]; then
+      echo "pod $pod (team pod)"
+      return 0
+    fi
+  done
+  echo "pod '$pod' is not a team pod"
+  return 1
+}
+
 # Phase 1 discovery + filtering. Same logic as ~/.claude/skills/kezoo-review-prs/SKILL.md
 # Phase 1, pulled into bash so empty/all-skipped ticks don't burn Claude tokens.
 # Writes surviving PR URLs into the FILTER_SURVIVORS array (caller reads it).
@@ -671,6 +746,7 @@ FILTER_SURVIVORS=()
 FILTER_TEAMS=()
 MEMBERSHIP_BLIND_SKIPS=0
 OWNED_GATE_FAILED=0
+PODS_GATE_FAILED=0
 filter_prs() {
   FILTER_SURVIVORS=()
   FILTER_TEAMS=()
@@ -684,7 +760,8 @@ filter_prs() {
   }
 
   # Mirrors the team-members list in ~/.claude/skills/kezoo-review-prs/SKILL.md.
-  # Keep in sync when the skill's team changes.
+  # Keep in sync when the skill's team changes. The roster now tells a teammate
+  # from an outside author; outside authors pass only through repo_pod_ours.
   #
   # Deliberately `local`, not a top-level array: load_config sources the
   # user-writable config.env, so a script-scope roster would be an
@@ -708,14 +785,25 @@ filter_prs() {
   while IFS=$'\t' read -r owner repo number author; do
     [[ -z "$number" ]] && continue
 
-    # 1. Team-author filter
+    # 1. Author gate: a teammate is admitted wherever the login is a code
+    # owner; an outside author only in a repo whose pod is a team pod.
     local in_team=0
     for t in "${team[@]}"; do
       [[ "$t" == "$author" ]] && { in_team=1; break; }
     done
-    if [[ "$in_team" == "0" ]]; then
-      echo "  skip #$number ($owner/$repo): author $author not on team"
+    if [[ "$in_team" == "1" ]]; then
+      echo "  admit #$number ($owner/$repo): author $author on team"
+    elif [[ "$PODS_GATE_FAILED" == "1" ]]; then
+      echo "  skip #$number ($owner/$repo): outside author $author — pods map unavailable, fail closed"
       continue
+    else
+      local pod_reason
+      if pod_reason=$(repo_pod_ours "$repo"); then
+        echo "  admit #$number ($owner/$repo): outside author $author — $pod_reason"
+      else
+        echo "  skip #$number ($owner/$repo): outside author $author — $pod_reason"
+        continue
+      fi
     fi
 
     # 2. Repo-cloned check — CAPABILITY: can this machine review it at all.
@@ -1274,6 +1362,17 @@ OSA
     OWNED_GATE_FAILED=1
   fi
   rm -f "$owned_out"
+  # Author gate input for outside authors: the repositories map. A missing or
+  # reshaped map skips every outside author this tick and lets the roster through.
+  PODS_GATE_FAILED=0
+  resolve_pods_csv
+  local pods_out
+  pods_out=$(mktemp)
+  if ! check_pods_header > "$pods_out"; then
+    echo "[$(date -Iseconds)] WARN: pods map unavailable — outside authors are skipped this tick ($(cat "$pods_out"))"
+    PODS_GATE_FAILED=1
+  fi
+  rm -f "$pods_out"
   restore_team_requests "$TEAM_REQUESTS_FILE" "$WORK_GH_USER" "$VERIFY"
 
   if ! filter_prs; then

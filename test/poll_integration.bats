@@ -5,7 +5,7 @@ load test_helper
 # redirected into the test tmpdir so no real state is touched.
 setup() {
   export HOME="$BATS_TEST_TMPDIR/home"
-  mkdir -p "$HOME/projects/work/otto-leases-service" "$HOME/worktrees"
+  mkdir -p "$HOME/projects/work/otto-leases-service" "$HOME/projects/work/services-contracts" "$HOME/projects/work/terraform-messaging" "$HOME/worktrees"
   export PR_REVIEW_POLLER_CONFIG="$BATS_TEST_TMPDIR/config.env"
   echo 'REVIEW_FREQUENCY="2h"' > "$PR_REVIEW_POLLER_CONFIG"
   export PR_REVIEW_POLLER_STATE_DIR="$BATS_TEST_TMPDIR/state"
@@ -26,16 +26,41 @@ setup() {
   cat > "$PR_REVIEW_OWNED_CSV" <<'CSV'
 "Team","Pod","Member"
 "otto-leases-service-co","Property Services (RTM)","aleksandr-beliakov-rs"
+"services-contracts-co","Property Services (RTM)","aleksandr-beliakov-rs"
+"terraform-messaging-co","Property Services (RTM)","aleksandr-beliakov-rs"
+CSV
+
+  # Author gate fixture: the repositories map with Pod as field 14 of 16.
+  export PR_REVIEW_PODS_CSV="$BATS_TEST_TMPDIR/pods.csv"
+  cat > "$PR_REVIEW_PODS_CSV" <<'CSV'
+"GhStatus","Repository","c3","c4","c5","c6","c7","c8","c9","c10","c11","c12","c13","Pod","c15","c16"
+"FoundInGh","otto-leases-service","3","4","5","6","7","8","9","10","11","12","13","Otto - Leasing","15","16"
+"FoundInGh","services-contracts","3","4","5","6","7","8","9","10","11","12","13","","15","16"
+"FoundInGh","terraform-messaging","3","4","5","6","7","8","9","10","11","12","13","DevOps","15","16"
 CSV
 
   # gh stub: auth token / search prs / pr view
   mkdir -p "$BATS_TEST_TMPDIR/bin"
   cat > "$BATS_TEST_TMPDIR/bin/gh" <<'GH'
 #!/bin/bash
+repo="${GH_STUB_REPO:-otto-leases-service}"
 case "$1 $2" in
   "auth token") echo "gho_stub" ;;
-  "search prs") echo '[{"number":265,"title":"t","repository":{"nameWithOwner":"roofstock/otto-leases-service"},"author":{"login":"dmitry-indikeev-rs"}}]' ;;
+  "search prs")
+    default_requested='[{"number":265,"title":"t","repository":{"nameWithOwner":"roofstock/'"$repo"'"},"author":{"login":"'"${GH_STUB_AUTHOR:-dmitry-indikeev-rs}"'"}}]'
+    case "$*" in
+      *--review-requested=@me*) echo "${GH_STUB_REQUESTED:-$default_requested}" ;;
+      *--reviewed-by=@me*) echo "${GH_STUB_REVIEWED:-[]}" ;;
+      *) echo "unexpected gh search: $*" >&2; exit 1 ;;
+    esac ;;
   "pr view")
+    for a in "$@"; do
+      if [ "$a" = ".state" ]; then
+        var="GH_STUB_PR_STATE_$3"
+        echo "${!var:-${GH_STUB_PR_STATE:-OPEN}}"
+        exit 0
+      fi
+    done
     default_rr='[{"__typename":"Team","name":"otto-leases-service-co","slug":"roofstock/otto-leases-service-co"}]'
     rr="${GH_STUB_REVIEW_REQUESTS:-$default_rr}"
     reviews='[]'
@@ -44,7 +69,7 @@ case "$1 $2" in
       reviews='[{"author":{"login":"aleksandr-beliakov-rs"},"state":"COMMENTED","submittedAt":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","commit":{"oid":"dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28"}}]'
     fi
     echo '{"state":"'"${GH_STUB_PR_STATE:-OPEN}"'","headRefOid":"dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28","reviews":'"$reviews"',"reviewRequests":'"$rr"',"headRefName":"LRX-9992-branch"}' ;;
-  "api repos/roofstock/otto-leases-service/commits/dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28") echo "2026-01-01T00:00:00Z" ;;
+  "api repos/roofstock/$repo/commits/dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28") echo "2026-01-01T00:00:00Z" ;;
   "api repos/roofstock/otto-leases-service/issues/265/timeline?per_page=100") echo '[]' ;;
   "api orgs/roofstock/teams/otto-leases-service-co/memberships/aleksandr-beliakov-rs") echo '{"state":"active","role":"member"}' ;;
   "api orgs/roofstock/teams/otto-leases-service-co/members?per_page=100") echo '[{"login":"aleksandr-beliakov-rs"}]' ;;
@@ -57,6 +82,14 @@ case "$1 $2" in
 esac
 GH
   chmod +x "$BATS_TEST_TMPDIR/bin/gh"
+
+  # osascript stub for the failure notification: records argv, reads no stdin.
+  # Head-mode tests replace it with write_osascript_shim, which reads stdin.
+  cat > "$BATS_TEST_TMPDIR/bin/osascript" <<'OSA'
+#!/bin/bash
+echo "$*" >> "${BATS_TEST_TMPDIR:?}/osascript-calls"
+OSA
+  chmod +x "$BATS_TEST_TMPDIR/bin/osascript"
 
   export STUB_REVIEW_MODEL="claude-probe-9-9"
   export STUB_ROLE_ARGS=empty
@@ -89,6 +122,8 @@ DW
   export RUN_ALL_INPUT="$BATS_TEST_TMPDIR/run-all-input.tsv"
   cat > "$PR_REVIEW_RUN_ALL" <<'RA'
 #!/bin/bash
+[ -n "${RUN_ALL_SLEEP:-}" ] && sleep "$RUN_ALL_SLEEP"
+date +%s > "${BATS_TEST_TMPDIR:?}/run-all-epoch"
 mkdir -p "${PR_REVIEW_RESULT_DIR:?}"
 tee "${RUN_ALL_INPUT:?}" | while IFS=$'\t' read -r repo pr branch slug head since; do
   [ -z "$pr" ] && continue
@@ -688,4 +723,52 @@ team_requests_key_present() {
   [[ "$(triage_prompt)" == *" --post "* ]]
   grep -qxF -- "team_reviewers[]=otto-leases-service-co" "$BATS_TEST_TMPDIR/gh-writes"
   ! team_requests_key_present || false
+}
+
+@test "an outside author in a team-pod repo reaches the reviewer" {
+  write_claude_stub writes
+  export GH_STUB_AUTHOR=outsider-rs
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"admit #265 (roofstock/otto-leases-service): outside author outsider-rs — pod Otto - Leasing (team pod)"* ]]
+  [[ "$output" == *"launching 1 reviewer"* ]]
+}
+
+@test "an outside author in services-contracts (empty pod) never reaches the reviewer" {
+  write_claude_stub writes
+  export GH_STUB_AUTHOR=outsider-rs GH_STUB_REPO=services-contracts
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"outside author outsider-rs — pod cell EMPTY"* ]]
+  [[ "$output" != *"launching"* ]]
+  [[ "$output" == *"poll done"* ]]
+}
+
+@test "an outside author in a DevOps repo is skipped" {
+  write_claude_stub writes
+  export GH_STUB_AUTHOR=outsider-rs GH_STUB_REPO=terraform-messaging
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [[ "$output" == *"pod 'DevOps' is not a team pod"* ]]
+  [[ "$output" != *"launching"* ]]
+}
+
+@test "a missing pods map warns, skips outside authors, reviews the teammate and exits 0" {
+  write_claude_stub writes
+  export PR_REVIEW_PODS_CSV="$BATS_TEST_TMPDIR/nope.csv"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARN: pods map unavailable — outside authors are skipped this tick (pods map unavailable"* ]]
+  [[ "$output" == *"launching 1 reviewer"* ]]
+  [[ "$output" != *"poll FAILED"* ]]
+}
+
+@test "a pods map with another header warns and skips an outside author" {
+  write_claude_stub writes
+  export GH_STUB_AUTHOR=outsider-rs
+  printf '"a","Repository","c","Pod"\n"x","otto-leases-service","y","Otto - Leasing"\n' > "$PR_REVIEW_PODS_CSV"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARN: pods map unavailable — outside authors are skipped this tick (pods map has an unexpected header"* ]]
+  [[ "$output" == *"outside author outsider-rs — pods map unavailable, fail closed"* ]]
+  [[ "$output" != *"launching"* ]]
 }
