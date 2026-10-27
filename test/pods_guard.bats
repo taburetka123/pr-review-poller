@@ -107,8 +107,18 @@ CSV
   [[ "$output" == *"pods map unavailable"* ]]
 }
 
-@test "PR_REVIEW_PODS_CSV overrides the fetch" {
+@test "PR_REVIEW_PODS_CSV from the environment at script start overrides the fetch" {
   PODS_CSV_FILE="$BATS_TEST_TMPDIR/other.csv"
-  PR_REVIEW_PODS_CSV="$BATS_TEST_TMPDIR/pods.csv" resolve_pods_csv
+  PODS_CSV_OVERRIDE="$BATS_TEST_TMPDIR/pods.csv"
+  resolve_pods_csv
   [ "$PODS_CSV_FILE" = "$BATS_TEST_TMPDIR/pods.csv" ]
+}
+
+@test "PR_REVIEW_PODS_CSV set after script start is ignored" {
+  PODS_CSV_FILE="$BATS_TEST_TMPDIR/other.csv"
+  PODS_CSV_OVERRIDE=""
+  export HOME="$BATS_TEST_TMPDIR/home"
+  STATE_DIR="$BATS_TEST_TMPDIR/state"
+  PR_REVIEW_PODS_CSV="$BATS_TEST_TMPDIR/pods.csv" resolve_pods_csv
+  [ "$PODS_CSV_FILE" != "$BATS_TEST_TMPDIR/pods.csv" ]
 }

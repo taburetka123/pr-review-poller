@@ -21,6 +21,11 @@ CLAUDE_DEFAULT="${PR_REVIEW_POLLER_CLAUDE_DEFAULT:-$REAL_CLAUDE}"
 CLAUDE="${PR_REVIEW_POLLER_CLAUDE:-$CLAUDE_DEFAULT}"
 RUN_ALL_SCRIPT="${PR_REVIEW_RUN_ALL:-$HOME/.claude/scripts/pr-review-run-all}"
 WORKTREE_SCRIPT="${PR_REVIEW_WORKTREE_SCRIPT:-$HOME/.claude/scripts/pr-review-worktree}"
+# The two map overrides are read from the environment HERE, before load_config
+# sources the user-writable config.env: a line there must not re-point either
+# map (tests set them in the environment).
+OWNED_CSV_OVERRIDE="${PR_REVIEW_OWNED_CSV:-}"
+PODS_CSV_OVERRIDE="${PR_REVIEW_PODS_CSV:-}"
 
 load_config() {
   if [[ -f "$CONFIG_FILE" ]]; then
@@ -556,11 +561,11 @@ SSH_EOF
 # checkout sits on — it is routinely parked on feature branches); falls back to
 # the working-tree copy with a logged warning; leaves the path missing when
 # neither resolves, which derive_owned_repos treats as fail-closed.
-# PR_REVIEW_OWNED_CSV overrides everything (tests).
+# PR_REVIEW_OWNED_CSV in the environment at script start overrides everything (tests).
 OWNED_CSV_FILE=""
 resolve_owned_csv() {
-  if [[ -n "${PR_REVIEW_OWNED_CSV:-}" ]]; then
-    OWNED_CSV_FILE="$PR_REVIEW_OWNED_CSV"
+  if [[ -n "${OWNED_CSV_OVERRIDE:-}" ]]; then
+    OWNED_CSV_FILE="$OWNED_CSV_OVERRIDE"
     return 0
   fi
   local pods_repo="$HOME/projects/work/engineering-pods"
@@ -668,12 +673,13 @@ repo_owned() {
 }
 
 # Resolve the freshest repositories map into PODS_CSV_FILE, the same way
-# resolve_owned_csv resolves the code-owner map. PR_REVIEW_PODS_CSV overrides
-# everything (tests). rc 0 always; a missing path fails check_pods_header.
+# resolve_owned_csv resolves the code-owner map. PR_REVIEW_PODS_CSV in the
+# environment at script start overrides everything (tests). rc 0 always; a
+# missing path fails check_pods_header.
 PODS_CSV_FILE=""
 resolve_pods_csv() {
-  if [[ -n "${PR_REVIEW_PODS_CSV:-}" ]]; then
-    PODS_CSV_FILE="$PR_REVIEW_PODS_CSV"
+  if [[ -n "${PODS_CSV_OVERRIDE:-}" ]]; then
+    PODS_CSV_FILE="$PODS_CSV_OVERRIDE"
     return 0
   fi
   local pods_repo="$HOME/projects/work/engineering-pods"
@@ -717,7 +723,8 @@ repo_pod_ours() {
   # Owner of this set: claude-project-configs
   # default/.claude/rules/common/roofstock-environment.md ("My team is LRX
   # (LES + RX)"). Change both together. `local` for the same reason as the
-  # roster in filter_prs.
+  # roster in filter_prs; the map path is pinned before config.env is sourced
+  # (PODS_CSV_OVERRIDE) for the same reason.
   local team_pods=("Otto - Leasing" "Otto - Resident Experience")
   if [[ -z "${PODS_CSV_FILE:-}" || ! -f "$PODS_CSV_FILE" ]]; then
     echo "pods map unavailable"

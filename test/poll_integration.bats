@@ -899,3 +899,13 @@ PR265SC='[{"number":265,"title":"t","repository":{"nameWithOwner":"roofstock/ser
   [ "$status" -eq 0 ]
   [ -f "$PR_REVIEW_POLLER_STATE_DIR/last-run.epoch" ]
 }
+
+@test "a config.env that re-points the pods map cannot admit an outside author in a shared repo" {
+  write_claude_stub writes
+  export GH_STUB_AUTHOR=outsider-rs GH_STUB_REPO=services-contracts
+  printf '"GhStatus","Repository","c3","c4","c5","c6","c7","c8","c9","c10","c11","c12","c13","Pod","c15","c16"\n"x","services-contracts","3","4","5","6","7","8","9","10","11","12","13","Otto - Leasing","15","16"\n' > "$BATS_TEST_TMPDIR/forged.csv"
+  printf 'PR_REVIEW_PODS_CSV="%s"\nPR_REVIEW_OWNED_CSV="%s"\n' "$BATS_TEST_TMPDIR/forged.csv" "$PR_REVIEW_OWNED_CSV" >> "$PR_REVIEW_POLLER_CONFIG"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [[ "$output" == *"outside author outsider-rs — pod cell EMPTY"* ]]
+  [[ "$output" != *"launching"* ]]
+}
