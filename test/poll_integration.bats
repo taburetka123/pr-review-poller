@@ -181,6 +181,16 @@ jq '.["roofstock/otto-leases-service#265"] = {commit: "dc2354f0f3270e27d8b06cdd3
 touch "$BATS_TEST_TMPDIR/posted"
 exit 1
 CL
+  elif [ "$1" = "holds-ticket" ]; then
+    cat > "$PR_REVIEW_POLLER_CLAUDE" <<'CL'
+#!/bin/bash
+{ printf '%s\n' "$@"; echo '--CALL--'; } >> "${BATS_TEST_TMPDIR:?}/claude-argv"
+L="$PR_REVIEW_POLLER_STATE_DIR/held.json"
+jq --arg reason "${STUB_HOLD_REASON:?}" '.["roofstock/otto-leases-service#265"] = {commit: "dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28", held_at: "2026-01-01T00:00:00Z", reason: $reason, pr_url: "https://github.com/roofstock/otto-leases-service/pull/265"}' "$L" > "$L.tmp" && mv "$L.tmp" "$L"
+mkdir -p "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service"
+printf '=== stub ===\nAction: HOLD\n' >> "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service/265.log"
+exit "${STUB_TRIAGE_RC:-0}"
+CL
   elif [ "$1" = "holds-stale" ]; then
     cat > "$PR_REVIEW_POLLER_CLAUDE" <<'CL'
 #!/bin/bash
@@ -760,7 +770,7 @@ ENV
   grep -qxF -- "team_reviewers[]=otto-leases-service-co" "$BATS_TEST_TMPDIR/gh-writes"
 }
 
-@test "a verify tick receives no Jira token" {
+@test "a verify tick adds no Jira token" {
   write_claude_stub writes
   run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
   [ "$status" -eq 0 ]
@@ -776,6 +786,73 @@ ENV
   run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
   [ "$status" -eq 0 ]
   [[ "$output" == *"poll done"* ]]
+}
+
+ledger_reason() {  # $1 = ledger key
+  jq -r --arg key "$1" '.[$key].reason // "gone"' "$PR_REVIEW_POLLER_STATE_DIR/held.json"
+}
+
+@test "a verify tick releases the unread-ticket HOLD it wrote, and the next real tick reviews the PR" {
+  write_claude_stub holds-ticket
+  export STUB_HOLD_REASON="Ticket: unread LRX-1: not found"
+  jq -n '{"roofstock/otto-other-service#1": {commit: "x", held_at: "2026-01-01T00:00:00+00:00", reason: "Ticket: unread LRX-9: not found"}}' > "$PR_REVIEW_POLLER_STATE_DIR/held.json"
+  run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"released roofstock/otto-leases-service#265"* ]]
+  [ "$(ledger_reason 'roofstock/otto-leases-service#265')" = "gone" ]
+  [ "$(ledger_reason 'roofstock/otto-other-service#1')" = "Ticket: unread LRX-9: not found" ]
+  grep -q 'Action: HOLD' "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service/265.log"
+  rm "$RUN_ALL_INPUT"
+  write_claude_stub writes
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  grep -q '265' "$RUN_ALL_INPUT"
+}
+
+@test "a verify tick releases its HOLD on a result with no parseable Ticket line" {
+  write_claude_stub holds-ticket
+  export STUB_HOLD_REASON="no parseable Ticket line"
+  run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [ "$(ledger_reason 'roofstock/otto-leases-service#265')" = "gone" ]
+}
+
+@test "a verify tick whose triage fails still releases the unread-ticket HOLD it wrote" {
+  write_claude_stub holds-ticket
+  export STUB_HOLD_REASON="Ticket: unread LRX-1: not found"
+  export STUB_TRIAGE_RC=1
+  run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
+  [ "$status" -eq 1 ]
+  [ "$(ledger_reason 'roofstock/otto-leases-service#265')" = "gone" ]
+}
+
+@test "a verify tick leaves a real tick's unread-ticket HOLD at the current head in place" {
+  write_claude_stub writes
+  jq -n '{"roofstock/otto-leases-service#265": {commit: "dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28", held_at: "2026-01-01T00:00:00+00:00", reason: "Ticket: unread LRX-1: not found"}}' > "$PR_REVIEW_POLLER_STATE_DIR/held.json"
+  run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"held at HEAD dc2354f pending human review"* ]]
+  [ ! -e "$RUN_ALL_INPUT" ]
+  [ "$(ledger_reason 'roofstock/otto-leases-service#265')" = "Ticket: unread LRX-1: not found" ]
+}
+
+@test "a verify tick keeps a judgement HOLD" {
+  write_claude_stub holds-ticket
+  export STUB_HOLD_REASON="1 major finding at conf 4"
+  run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [ "$(ledger_reason 'roofstock/otto-leases-service#265')" = "1 major finding at conf 4" ]
+}
+
+@test "a real tick keeps the unread-ticket HOLD it wrote, and the next tick skips the PR" {
+  write_claude_stub holds-ticket
+  export STUB_HOLD_REASON="Ticket: unread LRX-1: not found"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [ "$(ledger_reason 'roofstock/otto-leases-service#265')" = "Ticket: unread LRX-1: not found" ]
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"held at HEAD dc2354f pending human review"* ]]
 }
 
 @test "a role-args refusal that first appears at triage time fails closed and releases the PRs" {
