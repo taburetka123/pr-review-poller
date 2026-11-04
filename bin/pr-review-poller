@@ -1528,6 +1528,21 @@ OSA
   rm -f "$pods_out"
   restore_team_requests "$TEAM_REQUESTS_FILE" "$WORK_GH_USER" "$VERIFY"
 
+  if [[ "$VERIFY" != "1" ]]; then
+    # Only Jira: reviewers need it to read tickets, and no session gets the file's other secrets from here.
+    local _mcp_env="$HOME/.claude/secrets/mcp.env"
+    JIRA_API_TOKEN="$(unset JIRA_API_TOKEN; . "$_mcp_env" >/dev/null 2>&1; printf %s "${JIRA_API_TOKEN:-}")" || JIRA_API_TOKEN=""
+    if [[ -z "$JIRA_API_TOKEN" || "$JIRA_API_TOKEN" == "REPLACE_ME" ]]; then
+      unset JIRA_API_TOKEN
+      local _failed="poll FAILED — no usable JIRA_API_TOKEN in $_mcp_env; nothing was reviewed, no PR was claimed and the frequency gate was not stamped; set it there, then the next hourly tick retries, or 'pr-review-poller run --force' now"
+      echo "[$(date -Iseconds)] $_failed"
+      notify_failure "$_failed"
+      exit 1
+    fi
+    export JIRA_API_TOKEN READ_ONLY_MODE=true
+    echo "[$(date -Iseconds)] loaded the Jira token from $_mcp_env with READ_ONLY_MODE=true"
+  fi
+
   if ! filter_prs; then
     echo "[$(date -Iseconds)] filter failed, skipping tick"
     exit 0
