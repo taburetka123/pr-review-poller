@@ -49,7 +49,8 @@ Installed artifacts:
 - plist: `~/Library/LaunchAgents/com.kezoo.pr-review-poller.plist`
 - config: `~/.config/pr-review-poller/config.env`
 - logs: `~/worktrees/.pr-review-poller-{stdout,stderr}.log`
-- credential: each real tick exports `JIRA_API_TOKEN` from `~/.claude/secrets/mcp.env` with `READ_ONLY_MODE=true`, so reviewers and triage read Jira and `mcp-atlassian` hides its write tools. A PR's own `.claude/settings.json` can unset that flag in its reviewer's session. A tick with no usable token fails.
+- credential: each real tick exports `JIRA_API_TOKEN` from `~/.claude/secrets/mcp.env` with `READ_ONLY_MODE=true`, so reviewers and triage read Jira and `mcp-atlassian` hides its write tools. A tick with no usable token fails.
+- session isolation: reviewers and triage load `--setting-sources user` and take their MCP servers from `~/.claude/scripts/pr-review-mcp-config`. A PR's `.claude/**`, `CLAUDE.md`, `.mcp.json`, `node_modules`, Python modules and git hooks configure and run nothing at launch or in a session hook, and reviewers still read those files as the diff under review. A reviewer takes the repo's `CLAUDE.md` and `.claude/rules` from its clone through `--add-dir`. Two cases are not covered: a command the reviewer itself runs in the PR tree, and a clone a person has switched to a hostile PR's branch, where `--add-dir` loads that branch's `CLAUDE.md` and rules and triage's Bash meets that tree.
 
 ## Day-to-day
 

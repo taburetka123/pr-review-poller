@@ -21,6 +21,7 @@ CLAUDE_DEFAULT="${PR_REVIEW_POLLER_CLAUDE_DEFAULT:-$REAL_CLAUDE}"
 CLAUDE="${PR_REVIEW_POLLER_CLAUDE:-$CLAUDE_DEFAULT}"
 RUN_ALL_SCRIPT="${PR_REVIEW_RUN_ALL:-$HOME/.claude/scripts/pr-review-run-all}"
 WORKTREE_SCRIPT="${PR_REVIEW_WORKTREE_SCRIPT:-$HOME/.claude/scripts/pr-review-worktree}"
+MCP_CONFIG_SCRIPT="${PR_REVIEW_MCP_CONFIG_SCRIPT:-$HOME/.claude/scripts/pr-review-mcp-config}"
 # The two map overrides are read from the environment HERE, before load_config
 # sources config.env, so a PR_REVIEW_*_CSV line there is ignored (tests set
 # them in the environment). config.env is sourced bash and can still redefine
@@ -1560,6 +1561,13 @@ OSA
     fi
     export JIRA_API_TOKEN READ_ONLY_MODE=true
     echo "[$(date -Iseconds)] loaded the Jira token from $_mcp_env with READ_ONLY_MODE=true"
+    MCP_CONFIG_JSON="$("$MCP_CONFIG_SCRIPT")" || MCP_CONFIG_JSON=""
+    if [[ -z "$MCP_CONFIG_JSON" ]]; then
+      local _mcp_failed="poll FAILED — $MCP_CONFIG_SCRIPT printed no MCP config; nothing was reviewed, no PR was claimed and the frequency gate was not stamped; fix it, then the next hourly tick retries, or 'pr-review-poller run --force' now"
+      echo "[$(date -Iseconds)] $_mcp_failed"
+      notify_failure "$_mcp_failed"
+      exit 1
+    fi
   fi
 
   if ! filter_prs; then
@@ -1690,13 +1698,15 @@ OSA
     notify_failure "$_failed"
     exit 1
   fi
-  CLAUDE_FLAGS+=(--model "$REVIEW_MODEL" --effort medium)
+  CLAUDE_FLAGS+=(--model "$REVIEW_MODEL" --effort medium --setting-sources user)
   # VERIFY: no MCP servers at all — harness-enforced, so mcp github/slack write
   # tools do not exist in the triage session (layer 1 of the write block).
   if [[ "$VERIFY" == "1" ]]; then
     CLAUDE_FLAGS+=(--strict-mcp-config --mcp-config '{"mcpServers":{}}')
   fi
   echo "[$(date -Iseconds)] invoking claude (${CLAUDE_FLAGS[*]}) for triage of ${#_pr_urls[@]} PR(s): $SLASH ${_pr_urls[*]}"
+  # Added after the log line, so the JSON stays out of the tick log.
+  [[ "$VERIFY" == "1" ]] || CLAUDE_FLAGS+=(--mcp-config "$MCP_CONFIG_JSON")
   resolve_claude
   local rc=0
   "$CLAUDE" "${CLAUDE_FLAGS[@]}" -p "$SLASH ${_pr_urls[*]}" || rc=$?

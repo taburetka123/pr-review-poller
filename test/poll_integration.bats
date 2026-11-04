@@ -19,6 +19,14 @@ setup() {
   export PR_REVIEW_RUN_ALL="$BATS_TEST_TMPDIR/stub-run-all"
   export PR_REVIEW_WORKTREE_SCRIPT="$BATS_TEST_TMPDIR/stub-worktree"
   export PR_REVIEW_POLLER_CLAUDE="$BATS_TEST_TMPDIR/stub-claude"
+  export PR_REVIEW_MCP_CONFIG_SCRIPT="$BATS_TEST_TMPDIR/stub-mcp-config"
+  export STUB_MCP_JSON='{"mcpServers":{"stub":{"command":"/bin/sh","args":["-c","cd / && exec \"$@\"","sh","x y"]}}}'
+  cat > "$PR_REVIEW_MCP_CONFIG_SCRIPT" <<'MCP'
+#!/bin/bash
+[ "${STUB_MCP_CONFIG:-}" = refuse ] && exit 3
+printf '%s\n' "$STUB_MCP_JSON"
+MCP
+  chmod +x "$PR_REVIEW_MCP_CONFIG_SCRIPT"
   mkdir -p "$PR_REVIEW_POLLER_STATE_DIR"
   # prune gate: stamp fresh so prune_findings skips (no gh calls from prune)
   date +%s > "$PR_REVIEW_POLLER_STATE_DIR/last-prune.epoch"
@@ -658,7 +666,7 @@ team_requests_key_present() {
   run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
   [ "$status" -eq 0 ]
   [[ "$output" == *"poll done"* ]]
-  assert_triage_flags --append-system-prompt-file "$BATS_TEST_TMPDIR/role home/GenericWorker/role.lane.md" --settings "$BATS_TEST_TMPDIR/role-settings/0123456789abcdef.json" --model "$STUB_REVIEW_MODEL" --effort medium
+  assert_triage_flags --append-system-prompt-file "$BATS_TEST_TMPDIR/role home/GenericWorker/role.lane.md" --settings "$BATS_TEST_TMPDIR/role-settings/0123456789abcdef.json" --model "$STUB_REVIEW_MODEL" --effort medium --setting-sources user --mcp-config "$STUB_MCP_JSON"
   assert_every_call_pinned
 }
 
@@ -668,7 +676,7 @@ team_requests_key_present() {
   run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
   [ "$status" -eq 0 ]
   [[ "$output" == *"poll done"* ]]
-  assert_triage_flags --append-system-prompt-file "$BATS_TEST_TMPDIR/role home/GenericWorker/role.lane.md" --settings "$BATS_TEST_TMPDIR/role-settings/0123456789abcdef.json" --model "$STUB_REVIEW_MODEL" --effort medium --strict-mcp-config --mcp-config '{"mcpServers":{}}'
+  assert_triage_flags --append-system-prompt-file "$BATS_TEST_TMPDIR/role home/GenericWorker/role.lane.md" --settings "$BATS_TEST_TMPDIR/role-settings/0123456789abcdef.json" --model "$STUB_REVIEW_MODEL" --effort medium --setting-sources user --strict-mcp-config --mcp-config '{"mcpServers":{}}'
   assert_every_call_pinned
 }
 
@@ -685,6 +693,36 @@ team_requests_key_present() {
   [ ! -e "$BATS_TEST_TMPDIR/claude-argv" ]
   [ ! -e "$PR_REVIEW_POLLER_STATE_DIR/last-run.epoch" ]
   [ ! -e "$PR_REVIEW_POLLER_STATE_DIR/held.json" ] || ! grep -q 'in-flight' "$PR_REVIEW_POLLER_STATE_DIR/held.json"
+}
+
+@test "a refusing MCP config helper fails the tick before any reviewer runs, claiming nothing" {
+  write_claude_stub writes
+  export STUB_MCP_CONFIG=refuse
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"poll FAILED"* ]]
+  [[ "$output" == *"nothing was reviewed, no PR was claimed and the frequency gate was not stamped"* ]]
+  [[ "$output" != *"poll done"* ]]
+  [ ! -e "$RUN_ALL_INPUT" ]
+  [ ! -e "$BATS_TEST_TMPDIR/claude-argv" ]
+  [ ! -e "$PR_REVIEW_POLLER_STATE_DIR/last-run.epoch" ]
+  [ ! -e "$PR_REVIEW_POLLER_STATE_DIR/held.json" ] || ! grep -q 'in-flight' "$PR_REVIEW_POLLER_STATE_DIR/held.json"
+}
+
+@test "verify mode never calls the MCP config helper" {
+  write_claude_stub writes
+  export STUB_MCP_CONFIG=refuse
+  run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"poll done"* ]]
+}
+
+@test "the MCP config stays out of the tick log" {
+  write_claude_stub writes
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"invoking claude"* ]]
+  [[ "$output" != *"$STUB_MCP_JSON"* ]]
 }
 
 assert_jira_handed_over() {  # $1 = env record file
@@ -877,7 +915,7 @@ ledger_reason() {  # $1 = ledger key
   [ "$status" -eq 0 ]
   [[ "$output" == *"role-args GenericWorker --launch lane printed no flags"* ]]
   [[ "$output" == *"poll done"* ]]
-  assert_triage_flags --model "$STUB_REVIEW_MODEL" --effort medium
+  assert_triage_flags --model "$STUB_REVIEW_MODEL" --effort medium --setting-sources user --mcp-config "$STUB_MCP_JSON"
   assert_every_call_pinned
 }
 
@@ -886,7 +924,7 @@ ledger_reason() {  # $1 = ledger key
   run /bin/bash "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
   [ "$status" -eq 0 ]
   [[ "$output" == *"poll done"* ]]
-  assert_triage_flags --model "$STUB_REVIEW_MODEL" --effort medium
+  assert_triage_flags --model "$STUB_REVIEW_MODEL" --effort medium --setting-sources user --mcp-config "$STUB_MCP_JSON"
   assert_every_call_pinned
 }
 
@@ -896,7 +934,7 @@ ledger_reason() {  # $1 = ledger key
   run /bin/bash "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
   [ "$status" -eq 0 ]
   [[ "$output" == *"poll done"* ]]
-  assert_triage_flags --append-system-prompt-file "$BATS_TEST_TMPDIR/role home/GenericWorker/role.lane.md" --settings "$BATS_TEST_TMPDIR/role-settings/0123456789abcdef.json" --model "$STUB_REVIEW_MODEL" --effort medium
+  assert_triage_flags --append-system-prompt-file "$BATS_TEST_TMPDIR/role home/GenericWorker/role.lane.md" --settings "$BATS_TEST_TMPDIR/role-settings/0123456789abcdef.json" --model "$STUB_REVIEW_MODEL" --effort medium --setting-sources user --mcp-config "$STUB_MCP_JSON"
   assert_every_call_pinned
 }
 
