@@ -49,6 +49,7 @@ Installed artifacts:
 - plist: `~/Library/LaunchAgents/com.kezoo.pr-review-poller.plist`
 - config: `~/.config/pr-review-poller/config.env`
 - logs: `~/worktrees/.pr-review-poller-{stdout,stderr}.log`
+- credential: each real tick exports `JIRA_API_TOKEN` from `~/.claude/secrets/mcp.env` with `READ_ONLY_MODE=true`, so reviewers and triage read Jira and `mcp-atlassian` hides its write tools. A PR's own `.claude/settings.json` can unset that flag in its reviewer's session. A tick with no usable token fails.
 
 ## Day-to-day
 

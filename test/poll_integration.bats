@@ -6,6 +6,9 @@ load test_helper
 setup() {
   export HOME="$BATS_TEST_TMPDIR/home"
   mkdir -p "$HOME/projects/work/otto-leases-service" "$HOME/projects/work/services-contracts" "$HOME/projects/work/terraform-messaging" "$HOME/worktrees"
+  unset JIRA_API_TOKEN READ_ONLY_MODE GITHUB_MCP_PAT POSTGRES_PROD_PASSWORD
+  mkdir -p "$HOME/.claude/secrets"
+  printf "export GITHUB_MCP_PAT='fake-gh-pat'\nexport JIRA_API_TOKEN='fake-jira-token'\nexport POSTGRES_PROD_PASSWORD='fake-pg-password'\n" > "$HOME/.claude/secrets/mcp.env"
   export PR_REVIEW_POLLER_CONFIG="$BATS_TEST_TMPDIR/config.env"
   echo 'REVIEW_FREQUENCY="2h"' > "$PR_REVIEW_POLLER_CONFIG"
   export PR_REVIEW_POLLER_STATE_DIR="$BATS_TEST_TMPDIR/state"
@@ -124,6 +127,7 @@ DW
 #!/bin/bash
 [ -n "${RUN_ALL_SLEEP:-}" ] && sleep "$RUN_ALL_SLEEP"
 date +%s > "${BATS_TEST_TMPDIR:?}/run-all-epoch"
+printf 'JIRA_API_TOKEN=%s\nREAD_ONLY_MODE=%s\nGITHUB_MCP_PAT=%s\nPOSTGRES_PROD_PASSWORD=%s\n' "${JIRA_API_TOKEN:-unset}" "${READ_ONLY_MODE:-unset}" "${GITHUB_MCP_PAT:-unset}" "${POSTGRES_PROD_PASSWORD:-unset}" > "${BATS_TEST_TMPDIR:?}/run-all-env"
 mkdir -p "${PR_REVIEW_RESULT_DIR:?}"
 tee "${RUN_ALL_INPUT:?}" | while IFS=$'\t' read -r repo pr branch slug head since; do
   [ -z "$pr" ] && continue
@@ -146,6 +150,7 @@ write_claude_stub() {  # $1 = "writes" | "silent"
 #!/bin/bash
 { printf '%s\n' "$@"; echo '--CALL--'; } >> "${BATS_TEST_TMPDIR:?}/claude-argv"
 printf 'GH_CONFIG_DIR=%s\nPATH_HEAD=%s\nGH_RESOLVED=%s\n' "${GH_CONFIG_DIR:-unset}" "${PATH%%:*}" "$(command -v gh)" > "$BATS_TEST_TMPDIR/claude-env"
+printf 'JIRA_API_TOKEN=%s\nREAD_ONLY_MODE=%s\nGITHUB_MCP_PAT=%s\nPOSTGRES_PROD_PASSWORD=%s\n' "${JIRA_API_TOKEN:-unset}" "${READ_ONLY_MODE:-unset}" "${GITHUB_MCP_PAT:-unset}" "${POSTGRES_PROD_PASSWORD:-unset}" >> "$BATS_TEST_TMPDIR/claude-env"
 mkdir -p "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service"
 printf '=== stub ===\nAction: HOLD\n' >> "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service/265.log"
 CL
@@ -175,6 +180,16 @@ L="$PR_REVIEW_POLLER_STATE_DIR/held.json"
 jq '.["roofstock/otto-leases-service#265"] = {commit: "dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28", held_at: "2026-01-01T00:00:00Z", reason: "posting 2 comment(s) did not finish; see the findings log", pr_url: "https://github.com/roofstock/otto-leases-service/pull/265"}' "$L" > "$L.tmp" && mv "$L.tmp" "$L"
 touch "$BATS_TEST_TMPDIR/posted"
 exit 1
+CL
+  elif [ "$1" = "holds-ticket" ]; then
+    cat > "$PR_REVIEW_POLLER_CLAUDE" <<'CL'
+#!/bin/bash
+{ printf '%s\n' "$@"; echo '--CALL--'; } >> "${BATS_TEST_TMPDIR:?}/claude-argv"
+L="$PR_REVIEW_POLLER_STATE_DIR/held.json"
+jq --arg reason "${STUB_HOLD_REASON:?}" '.["roofstock/otto-leases-service#265"] = {commit: "dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28", held_at: "2026-01-01T00:00:00Z", reason: $reason, pr_url: "https://github.com/roofstock/otto-leases-service/pull/265"}' "$L" > "$L.tmp" && mv "$L.tmp" "$L"
+mkdir -p "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service"
+printf '=== stub ===\nAction: HOLD\n' >> "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service/265.log"
+exit "${STUB_TRIAGE_RC:-0}"
 CL
   elif [ "$1" = "holds-stale" ]; then
     cat > "$PR_REVIEW_POLLER_CLAUDE" <<'CL'
@@ -670,6 +685,174 @@ team_requests_key_present() {
   [ ! -e "$BATS_TEST_TMPDIR/claude-argv" ]
   [ ! -e "$PR_REVIEW_POLLER_STATE_DIR/last-run.epoch" ]
   [ ! -e "$PR_REVIEW_POLLER_STATE_DIR/held.json" ] || ! grep -q 'in-flight' "$PR_REVIEW_POLLER_STATE_DIR/held.json"
+}
+
+assert_jira_handed_over() {  # $1 = env record file
+  grep -qx 'JIRA_API_TOKEN=fake-jira-token' "$1"
+  grep -qx 'READ_ONLY_MODE=true' "$1"
+  grep -qx 'GITHUB_MCP_PAT=unset' "$1"
+  grep -qx 'POSTGRES_PROD_PASSWORD=unset' "$1"
+}
+
+assert_tick_refused_for_jira_token() {
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"poll FAILED — no usable JIRA_API_TOKEN in $HOME/.claude/secrets/mcp.env; nothing was reviewed, no PR was claimed and the frequency gate was not stamped"* ]]
+  [[ "$output" != *"launching"* ]]
+  [ ! -e "$RUN_ALL_INPUT" ]
+  [ ! -e "$BATS_TEST_TMPDIR/claude-argv" ]
+  [ ! -e "$PR_REVIEW_POLLER_STATE_DIR/last-run.epoch" ]
+  grep -q 'poll FAILED — no usable JIRA_API_TOKEN' "$BATS_TEST_TMPDIR/osascript-calls"
+}
+
+@test "a real tick hands reviewers and triage the Jira token and the read-only flag, and no other secret" {
+  write_claude_stub writes
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  assert_jira_handed_over "$BATS_TEST_TMPDIR/run-all-env"
+  assert_jira_handed_over "$BATS_TEST_TMPDIR/claude-env"
+  [[ "$output" != *"fake-jira-token"* ]]
+  [[ "$output" == *"READ_ONLY_MODE=true"* ]]
+}
+
+@test "under the launchd /bin/bash 3.2 a real tick hands over the Jira token" {
+  write_claude_stub writes
+  run /bin/bash "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  assert_jira_handed_over "$BATS_TEST_TMPDIR/claude-env"
+}
+
+@test "a missing mcp.env fails the tick, even with a token in the caller's environment" {
+  write_claude_stub writes
+  rm "$HOME/.claude/secrets/mcp.env"
+  export JIRA_API_TOKEN=inherited-token
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  assert_tick_refused_for_jira_token
+}
+
+@test "under the launchd /bin/bash 3.2 a missing mcp.env fails the tick" {
+  write_claude_stub writes
+  rm "$HOME/.claude/secrets/mcp.env"
+  run /bin/bash "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  assert_tick_refused_for_jira_token
+}
+
+@test "an mcp.env with no JIRA_API_TOKEN line fails the tick" {
+  write_claude_stub writes
+  printf "export GITHUB_MCP_PAT='fake-gh-pat'\n" > "$HOME/.claude/secrets/mcp.env"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  assert_tick_refused_for_jira_token
+}
+
+@test "the REPLACE_ME placeholder fails the tick" {
+  write_claude_stub writes
+  printf "export JIRA_API_TOKEN='REPLACE_ME'\n" > "$HOME/.claude/secrets/mcp.env"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  assert_tick_refused_for_jira_token
+}
+
+@test "an mcp.env that dies on an unbound variable fails the tick" {
+  write_claude_stub writes
+  cat > "$HOME/.claude/secrets/mcp.env" <<'ENV'
+export X="$NOT_SET_ANYWHERE"
+export JIRA_API_TOKEN='fake-jira-token'
+ENV
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  assert_tick_refused_for_jira_token
+}
+
+@test "a tick that fails on the Jira token still re-requests a pending team" {
+  write_claude_stub writes
+  touch "$BATS_TEST_TMPDIR/posted"
+  jq -n '{"roofstock/otto-leases-service#265": {teams: ["otto-leases-service-co"], since: "2026-01-01T00:00:00Z", pr_url: "https://github.com/roofstock/otto-leases-service/pull/265"}}' > "$PR_REVIEW_POLLER_STATE_DIR/team-requests.json"
+  rm "$HOME/.claude/secrets/mcp.env"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 1 ]
+  grep -qxF -- "team_reviewers[]=otto-leases-service-co" "$BATS_TEST_TMPDIR/gh-writes"
+}
+
+@test "a verify tick adds no Jira token" {
+  write_claude_stub writes
+  run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
+  [ "$status" -eq 0 ]
+  grep -qx 'JIRA_API_TOKEN=unset' "$BATS_TEST_TMPDIR/run-all-env"
+  grep -qx 'READ_ONLY_MODE=unset' "$BATS_TEST_TMPDIR/run-all-env"
+  grep -qx 'JIRA_API_TOKEN=unset' "$BATS_TEST_TMPDIR/claude-env"
+  grep -qx 'READ_ONLY_MODE=unset' "$BATS_TEST_TMPDIR/claude-env"
+}
+
+@test "a verify tick needs no mcp.env" {
+  write_claude_stub writes
+  rm "$HOME/.claude/secrets/mcp.env"
+  run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"poll done"* ]]
+}
+
+ledger_reason() {  # $1 = ledger key
+  jq -r --arg key "$1" '.[$key].reason // "gone"' "$PR_REVIEW_POLLER_STATE_DIR/held.json"
+}
+
+@test "a verify tick releases the unread-ticket HOLD it wrote, and the next real tick reviews the PR" {
+  write_claude_stub holds-ticket
+  export STUB_HOLD_REASON="Ticket: unread LRX-1: not found"
+  jq -n '{"roofstock/otto-other-service#1": {commit: "x", held_at: "2026-01-01T00:00:00+00:00", reason: "Ticket: unread LRX-9: not found"}}' > "$PR_REVIEW_POLLER_STATE_DIR/held.json"
+  run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"released roofstock/otto-leases-service#265"* ]]
+  [ "$(ledger_reason 'roofstock/otto-leases-service#265')" = "gone" ]
+  [ "$(ledger_reason 'roofstock/otto-other-service#1')" = "Ticket: unread LRX-9: not found" ]
+  grep -q 'Action: HOLD' "$PR_REVIEW_FINDINGS_ROOT/roofstock/otto-leases-service/265.log"
+  rm "$RUN_ALL_INPUT"
+  write_claude_stub writes
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  grep -q '265' "$RUN_ALL_INPUT"
+}
+
+@test "a verify tick releases its HOLD on a result with no parseable Ticket line" {
+  write_claude_stub holds-ticket
+  export STUB_HOLD_REASON="no parseable Ticket line"
+  run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [ "$(ledger_reason 'roofstock/otto-leases-service#265')" = "gone" ]
+}
+
+@test "a verify tick whose triage fails still releases the unread-ticket HOLD it wrote" {
+  write_claude_stub holds-ticket
+  export STUB_HOLD_REASON="Ticket: unread LRX-1: not found"
+  export STUB_TRIAGE_RC=1
+  run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
+  [ "$status" -eq 1 ]
+  [ "$(ledger_reason 'roofstock/otto-leases-service#265')" = "gone" ]
+}
+
+@test "a verify tick leaves a real tick's unread-ticket HOLD at the current head in place" {
+  write_claude_stub writes
+  jq -n '{"roofstock/otto-leases-service#265": {commit: "dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28", held_at: "2026-01-01T00:00:00+00:00", reason: "Ticket: unread LRX-1: not found"}}' > "$PR_REVIEW_POLLER_STATE_DIR/held.json"
+  run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"held at HEAD dc2354f pending human review"* ]]
+  [ ! -e "$RUN_ALL_INPUT" ]
+  [ "$(ledger_reason 'roofstock/otto-leases-service#265')" = "Ticket: unread LRX-1: not found" ]
+}
+
+@test "a verify tick keeps a judgement HOLD" {
+  write_claude_stub holds-ticket
+  export STUB_HOLD_REASON="1 major finding at conf 4"
+  run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [ "$(ledger_reason 'roofstock/otto-leases-service#265')" = "1 major finding at conf 4" ]
+}
+
+@test "a real tick keeps the unread-ticket HOLD it wrote, and the next tick skips the PR" {
+  write_claude_stub holds-ticket
+  export STUB_HOLD_REASON="Ticket: unread LRX-1: not found"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [ "$(ledger_reason 'roofstock/otto-leases-service#265')" = "Ticket: unread LRX-1: not found" ]
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"held at HEAD dc2354f pending human review"* ]]
 }
 
 @test "a role-args refusal that first appears at triage time fails closed and releases the PRs" {

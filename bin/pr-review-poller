@@ -155,9 +155,14 @@ Usage:
                                      the macOS keyring. This is still the ONLY
                                      mode E2E / verification runs use; a
                                      posting run is a human decision, never a
-                                     verification default. The findings log
-                                     records the INTENDED action (e.g.
-                                     APPROVE) — nothing lands on GitHub;
+                                     verification default. Nothing lands on
+                                     GitHub. The sessions have no Jira tool,
+                                     so a PR with a ticket HOLDs before triage
+                                     step 1: the findings log records that
+                                     HOLD, and the tick releases its ledger
+                                     entry so the next real tick reviews the
+                                     PR. A PR with no ticket records the
+                                     INTENDED action (e.g. APPROVE). Other
                                      ledger entries persist as usual
                                      (clear-hold to reset)
   pr-review-poller run --no-post     Do not post this run: the triage turns
@@ -1185,11 +1190,14 @@ prune_reviewed() {
   echo "[$(date -Iseconds)] prune reviewed: deleted=$deleted, kept=$kept, gh-errors=$errors"
 }
 
-# Drop the "[in-flight]" ledger entries of the given survivors so the next tick
-# retries them. Real holds stay. rc 0 always.
-release_inflight() {
+is_inflight_reason() { [[ "$1" == \[in-flight\]* ]]; }
+
+is_ticket_hold_reason() { [[ "$1" == "Ticket:"* || "$1" == "no parseable Ticket line"* ]]; }
+
+drop_survivor_entries() {  # $1 = reason predicate, $2 = what a failure warning names, then the survivors
   [[ -f "$LEDGER_FILE" ]] || return 0
-  local survivor _rest _o _r _n key reason keys=() keys_json tmp
+  local accepts="$1" what="$2" survivor _rest _o _r _n key reason keys=() keys_json tmp
+  shift 2
   for survivor in "$@"; do
     _rest="$survivor"
     _o="${_rest%%$'\t'*}"; _rest="${_rest#*$'\t'}"
@@ -1197,16 +1205,27 @@ release_inflight() {
     _n="${_rest%%$'\t'*}"
     key="$_o/$_r#$_n"
     reason=$(jq -r --arg key "$key" '.[$key].reason // empty' "$LEDGER_FILE" 2>/dev/null) || reason=""
-    [[ "$reason" == \[in-flight\]* ]] && keys+=("$key")
+    "$accepts" "$reason" && keys+=("$key")
   done
   [[ ${#keys[@]} -eq 0 ]] && return 0
+  printf '  released %s\n' "${keys[@]}"
   keys_json=$(printf '%s\n' "${keys[@]}" | jq -R . | jq -s 'map([.])')
   tmp=$(mktemp)
   if ! { jq --argjson drop "$keys_json" 'delpaths($drop)' "$LEDGER_FILE" > "$tmp" 2>/dev/null && mv "$tmp" "$LEDGER_FILE" 2>/dev/null; }; then
     rm -f "$tmp"
-    echo "  WARN: could not release the in-flight entries from $LEDGER_FILE"
+    echo "  WARN: could not release $what from $LEDGER_FILE"
   fi
   return 0
+}
+
+# Drop the "[in-flight]" ledger entries of the given survivors so the next tick
+# retries them. Real holds stay. rc 0 always.
+release_inflight() {
+  drop_survivor_entries is_inflight_reason "the in-flight entries" "$@"
+}
+
+release_verify_ticket_holds() {
+  drop_survivor_entries is_ticket_hold_reason "the unread-ticket holds of this verify tick" "$@"
 }
 
 # Show a macOS notification with the poll FAILED line. rc 0 always.
@@ -1528,6 +1547,21 @@ OSA
   rm -f "$pods_out"
   restore_team_requests "$TEAM_REQUESTS_FILE" "$WORK_GH_USER" "$VERIFY"
 
+  if [[ "$VERIFY" != "1" ]]; then
+    # Only Jira: reviewers need it to read tickets, and no session gets the file's other secrets from here.
+    local _mcp_env="$HOME/.claude/secrets/mcp.env"
+    JIRA_API_TOKEN="$(unset JIRA_API_TOKEN; . "$_mcp_env" >/dev/null 2>&1; printf %s "${JIRA_API_TOKEN:-}")" || JIRA_API_TOKEN=""
+    if [[ -z "$JIRA_API_TOKEN" || "$JIRA_API_TOKEN" == "REPLACE_ME" ]]; then
+      unset JIRA_API_TOKEN
+      local _failed="poll FAILED — no usable JIRA_API_TOKEN in $_mcp_env; nothing was reviewed, no PR was claimed and the frequency gate was not stamped; set it there, then the next hourly tick retries, or 'pr-review-poller run --force' now"
+      echo "[$(date -Iseconds)] $_failed"
+      notify_failure "$_failed"
+      exit 1
+    fi
+    export JIRA_API_TOKEN READ_ONLY_MODE=true
+    echo "[$(date -Iseconds)] loaded the Jira token from $_mcp_env with READ_ONLY_MODE=true"
+  fi
+
   if ! filter_prs; then
     echo "[$(date -Iseconds)] filter failed, skipping tick"
     exit 0
@@ -1666,6 +1700,9 @@ OSA
   resolve_claude
   local rc=0
   "$CLAUDE" "${CLAUDE_FLAGS[@]}" -p "$SLASH ${_pr_urls[*]}" || rc=$?
+  if [[ "$VERIFY" == "1" ]]; then
+    release_verify_ticket_holds "${FILTER_SURVIVORS[@]}"
+  fi
   pin_held_to_admitted_head "${FILTER_SURVIVORS[@]}"
   restore_team_requests "$TEAM_REQUESTS_FILE" "$WORK_GH_USER" "$VERIFY"
 
@@ -1679,7 +1716,7 @@ OSA
   cleanup_dispatched "${FILTER_SURVIVORS[@]}"
 
   # VERIFY: surface every blocked write attempt. Attempts are EXPECTED here —
-  # a triage that decides APPROVE will try and be denied; the findings log
+  # a triage that decides APPROVE on a PR with no ticket will try and be denied; the findings log
   # records the intended action. Blocked attempts do not fail the tick; the
   # findings assertion above is the pass/fail authority.
   if [[ "$VERIFY" == "1" && -s "$VERIFY_GUARD_LOG" ]]; then
