@@ -13,6 +13,7 @@ LAST_PRUNE_FILE="$STATE_DIR/last-prune.epoch"
 LEDGER_FILE="$STATE_DIR/held.json"
 TEAM_REQUESTS_FILE="$STATE_DIR/team-requests.json"
 REVIEWED_FILE="$STATE_DIR/reviewed.json"
+REQUESTED_DIR="$STATE_DIR/requested.d"
 STDOUT_LOG="$HOME/worktrees/.pr-review-poller-stdout.log"
 STDERR_LOG="$HOME/worktrees/.pr-review-poller-stderr.log"
 FINDINGS_DIR="${PR_REVIEW_FINDINGS_ROOT:-$HOME/worktrees/.pr-review-findings}"
@@ -183,6 +184,10 @@ Usage:
                                      or bare number. A PR whose latest review
                                      by the work account is at its head (a
                                      posted comment) waits for a new head
+  pr-review-poller request <pr-url>  Queue one named PR for the next tick, past
+                                     the author and code-owner gates. Last
+                                     line: 'queued <owner>/<repo>#<n>' (exit 0)
+                                     or 'not queued: <reason>' (exit 4)
   pr-review-poller prune             Delete findings logs for PRs that are no
                                      longer OPEN (MERGED or CLOSED). Runs
                                      automatically once/24h during 'run'
@@ -258,6 +263,17 @@ cmd_status() {
     echo
     echo "held (waiting for human review):"
     jq -r 'to_entries[] | "  \(.key)\n    commit \(.value.commit[:7]), held \(.value.held_at)\n    \(.value.reason)\n    \(.value.pr_url)"' "$HELD"
+  fi
+
+  local req_file req_lines=""
+  for req_file in "$REQUESTED_DIR"/*.json; do
+    [[ -f "$req_file" ]] || continue
+    req_lines="$req_lines$(jq -r '"  \(.pr_url | capture("github\\.com/(?<o>[^/]+)/(?<r>[^/]+)/pull/(?<n>[0-9]+)") | "\(.o)/\(.r)#\(.n)")  requested \(.requested_at)"' "$req_file" 2>/dev/null || echo "  $req_file: unreadable")"$'\n'
+  done
+  if [[ -n "$req_lines" ]]; then
+    echo
+    echo "requested (waiting for the next tick):"
+    printf '%s' "$req_lines"
   fi
 }
 
@@ -766,12 +782,50 @@ FILTER_TEAMS=()
 MEMBERSHIP_BLIND_SKIPS=0
 OWNED_GATE_FAILED=0
 PODS_GATE_FAILED=0
+
+request_file() {
+  printf '%s\n' "$REQUESTED_DIR/$1__$2__$3.json"
+}
+
+drop_request() {
+  local file requested_at
+  [[ -n "${TICK_START_UTC:-}" ]] || return 0
+  file=$(request_file "$1" "$2" "$3")
+  [[ -f "$file" ]] || return 0
+  requested_at=$(jq -r '.requested_at // empty' "$file" 2>/dev/null) || return 0
+  if [[ "$requested_at" < "$TICK_START_UTC" ]]; then
+    rm -f "$file"
+  fi
+  return 0
+}
+
+pr_my_last_oid() {
+  printf '%s' "$1" | jq -r --arg me "$2" \
+    '[.reviews[] | select(.author.login == $me)] | last | .commit.oid // empty' 2>/dev/null
+}
+
+pr_approved() {
+  [[ "$(printf '%s' "$1" | jq '[.reviews | group_by(.author.login)[] | max_by(.submittedAt) | select(.state == "APPROVED")] | length > 0' 2>/dev/null)" == "true" ]]
+}
+
+ledger_hold() {
+  local held_commit held_reason
+  [[ -f "$LEDGER_FILE" ]] || return 0
+  held_commit=$(jq -r --arg key "$1" '.[$key].commit // empty' "$LEDGER_FILE" 2>/dev/null)
+  held_reason=$(jq -r --arg key "$1" '.[$key].reason // empty' "$LEDGER_FILE" 2>/dev/null)
+  [[ "$held_commit" == "$2" ]] || return 0
+  if [[ "$held_reason" == \[in-flight\]* ]]; then
+    echo "in-flight"
+  else
+    echo "held"
+  fi
+}
+
 filter_prs() {
   FILTER_SURVIVORS=()
   FILTER_TEAMS=()
   MEMBERSHIP_BLIND_SKIPS=0
   local me="$WORK_GH_USER"
-  local ledger="$LEDGER_FILE"
   local now_epoch; now_epoch=$(date +%s)
   local min_seconds; min_seconds=$(duration_to_seconds "$MIN_COMMIT_AGE") || {
     echo "invalid --min-commit-age: $MIN_COMMIT_AGE" >&2
@@ -805,7 +859,18 @@ filter_prs() {
   fi
   [[ -z "$raw_requested" ]] && raw_requested='[]'
   [[ -z "$raw_reviewed" ]] && raw_reviewed='[]'
-  if [[ "$raw_requested" == "[]" && "$raw_reviewed" == "[]" ]]; then
+  local raw_named='[]' req_file req_url
+  for req_file in "$REQUESTED_DIR"/*.json; do
+    [[ -f "$req_file" ]] || continue
+    req_url=$(jq -r '.pr_url // empty' "$req_file" 2>/dev/null) || req_url=""
+    if [[ "$req_url" =~ ^https://github\.com/([^/]+)/([^/]+)/pull/([0-9]+)$ ]]; then
+      raw_named=$(printf '%s' "$raw_named" | jq -c --arg r "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}" --argjson n "${BASH_REMATCH[3]}" \
+        '. + [{number: $n, title: "", repository: {nameWithOwner: $r}, author: {login: "unknown"}}]')
+    else
+      echo "  skip requested $req_file: unreadable"
+    fi
+  done
+  if [[ "$raw_requested" == "[]" && "$raw_reviewed" == "[]" && "$raw_named" == "[]" ]]; then
     return 0
   fi
   if [[ "$(echo "$raw_requested" | jq 'length')" -ge "$search_limit" ]]; then
@@ -814,20 +879,23 @@ filter_prs() {
   if [[ "$(echo "$raw_reviewed" | jq 'length')" -ge "$search_limit" ]]; then
     echo "  WARN: gh search --reviewed-by returned $search_limit PRs, the --limit cap; PRs past it are not considered this tick"
   fi
-  if ! raw=$(jq -n --argjson a "$raw_requested" --argjson b "$raw_reviewed" '
-      ($a | map(. + {via_requested: 1, via_reviewed: 0})) + ($b | map(. + {via_requested: 0, via_reviewed: 1}))
+  if ! raw=$(jq -n --argjson a "$raw_requested" --argjson b "$raw_reviewed" --argjson c "$raw_named" '
+      ($a | map(. + {via_requested: 1, via_reviewed: 0, via_named: 0}))
+      + ($b | map(. + {via_requested: 0, via_reviewed: 1, via_named: 0}))
+      + ($c | map(. + {via_requested: 0, via_reviewed: 0, via_named: 1}))
       | group_by(.repository.nameWithOwner + "#" + (.number | tostring))
       | map({number: .[0].number, title: .[0].title, repository: .[0].repository, author: .[0].author,
-             via_requested: (map(.via_requested) | max), via_reviewed: (map(.via_reviewed) | max)})' 2>&1); then
+             via_requested: (map(.via_requested) | max), via_reviewed: (map(.via_reviewed) | max),
+             via_named: (map(.via_named) | max)})' 2>&1); then
     echo "gh search results could not be merged: $raw" >&2
     return 1
   fi
 
-  while IFS=$'\t' read -r owner repo number author via_requested via_reviewed; do
+  while IFS=$'\t' read -r owner repo number author via_requested via_reviewed via_named; do
     [[ -z "$number" ]] && continue
 
     # 0. A PR found only by the reviewed-by search needs the poller's own record.
-    if [[ "$via_requested" != "1" ]]; then
+    if [[ "$via_requested" != "1" && "$via_named" != "1" ]]; then
       if [[ ! -f "$REVIEWED_FILE" ]] || ! jq -e --arg key "$owner/$repo#$number" 'has($key)' "$REVIEWED_FILE" >/dev/null 2>&1; then
         echo "  skip #$number ($owner/$repo): reviewed-by search — not admitted by the poller before"
         continue
@@ -840,7 +908,9 @@ filter_prs() {
     for t in "${team[@]}"; do
       [[ "$t" == "$author" ]] && { in_team=1; break; }
     done
-    if [[ "$in_team" == "1" ]]; then
+    if [[ "$via_named" == "1" ]]; then
+      echo "  admit #$number ($owner/$repo): requested by name"
+    elif [[ "$in_team" == "1" ]]; then
       echo "  admit #$number ($owner/$repo): author $author on team"
     elif [[ "$PODS_GATE_FAILED" == "1" ]]; then
       echo "  skip #$number ($owner/$repo): outside author $author — pods map unavailable, fail closed"
@@ -871,7 +941,9 @@ filter_prs() {
       continue
     fi
     local owned_reason
-    if owned_reason=$(repo_owned "$repo"); then
+    if [[ "$via_named" == "1" ]]; then
+      :
+    elif owned_reason=$(repo_owned "$repo"); then
       echo "  admit #$number ($owner/$repo): domain gate — $owned_reason"
     else
       echo "  skip #$number ($owner/$repo): domain gate — $owned_reason"
@@ -892,6 +964,7 @@ filter_prs() {
     pr_state=$(echo "$info" | jq -r '.state // "OPEN"' 2>/dev/null)
     if [[ "$pr_state" != "OPEN" ]]; then
       echo "  skip #$number ($owner/$repo): state is $pr_state, not OPEN"
+      drop_request "$owner" "$repo" "$number"
       continue
     fi
 
@@ -925,10 +998,10 @@ filter_prs() {
 
     # 5. Last-review-commit dedup
     local my_last_oid
-    my_last_oid=$(echo "$info" | jq -r --arg me "$me" \
-      '[.reviews[] | select(.author.login == $me)] | last | .commit.oid // empty' 2>/dev/null)
+    my_last_oid=$(pr_my_last_oid "$info" "$me")
     if [[ -n "$my_last_oid" && "$my_last_oid" == "$head_oid" ]]; then
       echo "  skip #$number ($owner/$repo): already reviewed at HEAD ${head_oid:0:7}"
+      drop_request "$owner" "$repo" "$number"
       continue
     fi
 
@@ -940,10 +1013,9 @@ filter_prs() {
     fi
 
     # 6. Already-approved-by-anyone skip
-    local approved
-    approved=$(echo "$info" | jq '[.reviews | group_by(.author.login)[] | max_by(.submittedAt) | select(.state == "APPROVED")] | length > 0' 2>/dev/null)
-    if [[ "$approved" == "true" ]]; then
+    if pr_approved "$info"; then
       echo "  skip #$number ($owner/$repo): already approved by another reviewer"
+      drop_request "$owner" "$repo" "$number"
       continue
     fi
 
@@ -952,18 +1024,15 @@ filter_prs() {
     #   - "[in-flight]" placeholder written by cmd_run before invoking claude
     #     so a mid-review crash (rate-limit, etc.) doesn't burn a retry next
     #     tick. User clears via `pr-review-poller clear-hold <pr>`.
-    if [[ -f "$ledger" ]]; then
-      local held_commit held_reason
-      held_commit=$(jq -r --arg key "$owner/$repo#$number" '.[$key].commit // empty' "$ledger" 2>/dev/null)
-      held_reason=$(jq -r --arg key "$owner/$repo#$number" '.[$key].reason // empty' "$ledger" 2>/dev/null)
-      if [[ "$held_commit" == "$head_oid" ]]; then
-        if [[ "$held_reason" == \[in-flight\]* ]]; then
-          echo "  skip #$number ($owner/$repo): in-flight entry at HEAD ${head_oid:0:7} (clear-hold to retry)"
-        else
-          echo "  skip #$number ($owner/$repo): held at HEAD ${head_oid:0:7} pending human review"
-        fi
-        continue
-      fi
+    local hold
+    hold=$(ledger_hold "$owner/$repo#$number" "$head_oid")
+    if [[ "$hold" == "in-flight" ]]; then
+      echo "  skip #$number ($owner/$repo): in-flight entry at HEAD ${head_oid:0:7} (clear-hold to retry)"
+      continue
+    elif [[ "$hold" == "held" ]]; then
+      echo "  skip #$number ($owner/$repo): held at HEAD ${head_oid:0:7} pending human review"
+      drop_request "$owner" "$repo" "$number"
+      continue
     fi
 
     local team_requests
@@ -973,7 +1042,7 @@ filter_prs() {
     fi
     # A PR the reviewed-by search returned already consumed its request: the
     # membership-blind skip does not apply to it.
-    if [[ -z "$team_requests" && "$via_reviewed" != "1" ]] && printf '%s' "$info" | jq -e --arg me "$me" '(.reviewRequests // []) | any(.__typename == "Team") and (any(.login == $me) | not)' >/dev/null 2>&1; then
+    if [[ -z "$team_requests" && "$via_reviewed" != "1" && "$via_named" != "1" ]] && printf '%s' "$info" | jq -e --arg me "$me" '(.reviewRequests // []) | any(.__typename == "Team") and (any(.login == $me) | not)' >/dev/null 2>&1; then
       echo "  skip #$number ($owner/$repo): requests him neither by name nor through a team GitHub lists him in"
       MEMBERSHIP_BLIND_SKIPS=$((MEMBERSHIP_BLIND_SKIPS + 1))
       continue
@@ -989,7 +1058,8 @@ filter_prs() {
       (.number | tostring),
       (.author.login // "unknown"),
       (.via_requested | tostring),
-      (.via_reviewed | tostring)
+      (.via_reviewed | tostring),
+      (.via_named | tostring)
     ] | @tsv')
 }
 
@@ -1472,6 +1542,7 @@ OSA
   fi
 
   TICK_START=$(date +%s)
+  TICK_START_UTC=$(date -u -r "$TICK_START" +%Y-%m-%dT%H:%M:%SZ)
   echo "[$(date -Iseconds)] poll start (min-commit-age=$MIN_COMMIT_AGE, frequency=$REVIEW_FREQUENCY, post=$POST, verify=$VERIFY, cwd=$WORK_CWD, gh_user=$WORK_GH_USER)"
 
   # Daily housekeeping: drop findings logs for PRs that are no longer open.
@@ -1758,6 +1829,10 @@ OSA
     notify_failure "$_failed"
     exit 1
   fi
+  for _s in "${FILTER_SURVIVORS[@]}"; do
+    IFS=$'\t' read -r _o _r _n _rest <<<"$_s"
+    drop_request "$_o" "$_r" "$_n"
+  done
   mkdir -p "$(dirname "$LAST_RUN_FILE")"
   echo "$TICK_START" > "$LAST_RUN_FILE"
   echo "[$(date -Iseconds)] poll done"
@@ -1868,6 +1943,61 @@ cmd_clear_hold() {
   echo "cleared $key"
 }
 
+cmd_request() {
+  local arg="${1:-}" owner repo n me info state head_oid tmp
+  if ! [[ "$arg" =~ github\.com/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
+    echo "expected GitHub PR URL"
+    exit 2
+  fi
+  owner="${BASH_REMATCH[1]}"; repo="${BASH_REMATCH[2]}"; n="${BASH_REMATCH[3]}"
+  if ! launchctl list | awk '{print $3}' | grep -qx "$LABEL"; then
+    echo "not queued: poller stopped"
+    exit 4
+  fi
+  me="${PR_REVIEW_POLLER_GH_USER:-aleksandr-beliakov-rs}"
+  if ! GH_TOKEN=$(gh auth token --user "$me" -h github.com 2>&1); then
+    echo "could not get gh token for $me: $GH_TOKEN" >&2
+    exit 1
+  fi
+  export GH_TOKEN
+  if ! info=$(gh pr view "$n" -R "$owner/$repo" --json state,reviews,headRefOid 2>&1); then
+    echo "gh pr view failed: $info" >&2
+    exit 1
+  fi
+  state=$(printf '%s' "$info" | jq -r '.state // empty' 2>/dev/null) || state=""
+  head_oid=$(printf '%s' "$info" | jq -r '.headRefOid // empty' 2>/dev/null) || head_oid=""
+  if [[ -z "$state" || -z "$head_oid" ]]; then
+    echo "gh pr view printed no state or head: $info" >&2
+    exit 1
+  fi
+  if [[ "$state" != "OPEN" ]]; then
+    echo "not queued: $state"
+    exit 4
+  fi
+  if [[ ! -d "$HOME/projects/work/$repo" ]]; then
+    echo "not queued: not cloned"
+    exit 4
+  fi
+  if [[ "$(pr_my_last_oid "$info" "$me")" == "$head_oid" ]]; then
+    echo "not queued: reviewed at head"
+    exit 4
+  fi
+  if pr_approved "$info"; then
+    echo "not queued: approved"
+    exit 4
+  fi
+  if [[ "$(ledger_hold "$owner/$repo#$n" "$head_oid")" == "held" ]]; then
+    echo "not queued: held at head"
+    exit 4
+  fi
+  mkdir -p "$REQUESTED_DIR"
+  tmp=$(mktemp "$REQUESTED_DIR/.request.XXXXXX")
+  jq -n --arg u "https://github.com/$owner/$repo/pull/$n" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{pr_url: $u, requested_at: $t}' > "$tmp"
+  mv "$tmp" "$(request_file "$owner" "$repo" "$n")"
+  echo "queued $owner/$repo#$n"
+}
+
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   SUB="${1:-status}"
   [[ $# -gt 0 ]] && shift
@@ -1880,6 +2010,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     logs)       cmd_logs       "$@" ;;
     findings)   cmd_findings   "$@" ;;
     clear-hold) cmd_clear_hold "$@" ;;
+    request)    cmd_request    "$@" ;;
     prune)      cmd_prune      "$@" ;;
     config)     cmd_config     "$@" ;;
     help|-h|--help) cmd_help ;;

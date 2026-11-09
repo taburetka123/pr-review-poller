@@ -80,7 +80,7 @@ case "$1 $2" in
       reviews='[{"author":{"login":"aleksandr-beliakov-rs"},"state":"COMMENTED","submittedAt":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","commit":{"oid":"dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28"}}]'
     fi
     echo '{"state":"'"${GH_STUB_PR_STATE:-OPEN}"'","headRefOid":"dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28","reviews":'"$reviews"',"reviewRequests":'"$rr"',"headRefName":"LRX-9992-branch"}' ;;
-  "api repos/roofstock/$repo/commits/dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28") echo "2026-01-01T00:00:00Z" ;;
+  "api repos/roofstock/$repo/commits/dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28") echo "${GH_STUB_COMMIT_DATE:-2026-01-01T00:00:00Z}" ;;
   "api repos/roofstock/otto-leases-service/issues/265/timeline?per_page=100") echo '[]' ;;
   "api orgs/roofstock/teams/otto-leases-service-co/memberships/aleksandr-beliakov-rs") echo '{"state":"active","role":"member"}' ;;
   "api orgs/roofstock/teams/otto-leases-service-co/members?per_page=100") echo '[{"login":"aleksandr-beliakov-rs"}]' ;;
@@ -1129,4 +1129,170 @@ PR265SC='[{"number":265,"title":"t","repository":{"nameWithOwner":"roofstock/ser
   run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
   [[ "$output" == *"outside author outsider-rs — pod cell EMPTY"* ]]
   [[ "$output" != *"launching"* ]]
+}
+
+HEAD265="dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28"
+
+request_path() {
+  printf '%s\n' "$PR_REVIEW_POLLER_STATE_DIR/requested.d/$1__$2__$3.json"
+}
+
+queue_pr() {
+  mkdir -p "$PR_REVIEW_POLLER_STATE_DIR/requested.d"
+  jq -n --arg u "https://github.com/$1/$2/pull/$3" '{pr_url: $u, requested_at: "2026-01-01T00:00:00Z"}' > "$(request_path "$1" "$2" "$3")"
+}
+
+hold_265() {
+  jq -n --arg c "$HEAD265" --arg r "$1" --arg t "$(date -Iseconds)" '{"roofstock/otto-leases-service#265": {commit: $c, held_at: $t, reason: $r, pr_url: "https://github.com/roofstock/otto-leases-service/pull/265"}}' > "$PR_REVIEW_POLLER_STATE_DIR/held.json"
+}
+
+@test "a queued PR is reviewed when both searches are empty" {
+  write_claude_stub writes
+  export GH_STUB_REQUESTED='[]'
+  queue_pr roofstock otto-leases-service 265
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"launching 1 reviewer"* ]]
+  [[ "$output" == *"poll done"* ]]
+  [ ! -e "$(request_path roofstock otto-leases-service 265)" ]
+}
+
+@test "a queued PR outside his code-owner repos and from an outside author is reviewed" {
+  write_claude_stub writes
+  export GH_STUB_REQUESTED='[]' GH_STUB_REPO=terraform-messaging
+  printf '"Team","Pod","Member"\n"otto-leases-service-co","p","aleksandr-beliakov-rs"\n' > "$PR_REVIEW_OWNED_CSV"
+  queue_pr roofstock terraform-messaging 265
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [[ "$output" == *"admit #265 (roofstock/terraform-messaging): requested by name"* ]]
+  [[ "$output" == *"launching 1 reviewer"* ]]
+  [ "$(cut -f1,2 "$RUN_ALL_INPUT")" = $'terraform-messaging\t265' ]
+}
+
+@test "a PR in the search and in the queue is reviewed once" {
+  write_claude_stub writes
+  queue_pr roofstock otto-leases-service 265
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [[ "$output" == *"launching 1 reviewer"* ]]
+  [ "$(grep -c '^otto-leases-service' "$RUN_ALL_INPUT")" -eq 1 ]
+}
+
+@test "a queued PR held at its head is skipped and leaves the queue" {
+  write_claude_stub writes
+  export GH_STUB_REQUESTED='[]'
+  hold_265 "needs human"
+  queue_pr roofstock otto-leases-service 265
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [[ "$output" == *"held at HEAD dc2354f pending human review"* ]]
+  [[ "$output" != *"launching"* ]]
+  [ ! -e "$(request_path roofstock otto-leases-service 265)" ]
+}
+
+@test "a queued PR with an in-flight entry is skipped and stays queued" {
+  write_claude_stub writes
+  export GH_STUB_REQUESTED='[]'
+  hold_265 "[in-flight] auto-claimed before review"
+  queue_pr roofstock otto-leases-service 265
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [[ "$output" == *"in-flight entry at HEAD dc2354f"* ]]
+  [[ "$output" != *"launching"* ]]
+  [ -f "$(request_path roofstock otto-leases-service 265)" ]
+}
+
+@test "a queued PR younger than the commit-age gate stays queued" {
+  write_claude_stub writes
+  export GH_STUB_REQUESTED='[]'
+  export GH_STUB_COMMIT_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  queue_pr roofstock otto-leases-service 265
+  run "$SCRIPT_UNDER_TEST" run --force
+  [[ "$output" == *"skip #265 (roofstock/otto-leases-service): newest commit is"* ]]
+  [[ "$output" != *"launching"* ]]
+  [ -f "$(request_path roofstock otto-leases-service 265)" ]
+}
+
+@test "a request made while the tick runs survives the tick" {
+  write_claude_stub writes
+  export GH_STUB_REQUESTED='[]'
+  queue_pr roofstock otto-leases-service 265
+  export REQUEST_FILE="$(request_path roofstock otto-leases-service 265)"
+  mv "$PR_REVIEW_RUN_ALL" "$BATS_TEST_TMPDIR/stub-run-all-inner"
+  cat > "$PR_REVIEW_RUN_ALL" <<'RA'
+#!/bin/bash
+jq -n --arg t "$(date -u -v+1S +%Y-%m-%dT%H:%M:%SZ)" '{pr_url: "https://github.com/roofstock/otto-leases-service/pull/265", requested_at: $t}' > "$REQUEST_FILE"
+exec "$BATS_TEST_TMPDIR/stub-run-all-inner"
+RA
+  chmod +x "$PR_REVIEW_RUN_ALL"
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"poll done"* ]]
+  [ -f "$REQUEST_FILE" ]
+}
+
+@test "a request older than the tick start leaves the queue after triage" {
+  write_claude_stub writes
+  queue_pr roofstock otto-leases-service 265
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"poll done"* ]]
+  [ ! -e "$(request_path roofstock otto-leases-service 265)" ]
+}
+
+@test "a queued PR's team request is recorded and restored" {
+  write_claude_stub posts
+  export GH_STUB_REQUESTED='[]'
+  queue_pr roofstock otto-leases-service 265
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  grep -qxF -- "team_reviewers[]=otto-leases-service-co" "$BATS_TEST_TMPDIR/gh-writes"
+  [[ "$output" == *"re-requested review from team otto-leases-service-co on roofstock/otto-leases-service#265"* ]]
+  ! team_requests_key_present || false
+}
+
+@test "a queued PR is skipped while the code-owner map is unavailable" {
+  write_claude_stub writes
+  export GH_STUB_REQUESTED='[]'
+  printf '"Team","Pod","Member"\n"otto-leases-service-co","p","somebody-else-rs"\n' > "$PR_REVIEW_OWNED_CSV"
+  queue_pr roofstock otto-leases-service 265
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"skip #265 (roofstock/otto-leases-service): domain gate unavailable (see the ERROR above) — fail closed"* ]]
+  [[ "$output" == *"poll FAILED — domain gate unavailable"* ]]
+  [ -f "$(request_path roofstock otto-leases-service 265)" ]
+}
+
+@test "a queued PR that is closed leaves the queue" {
+  write_claude_stub writes
+  export GH_STUB_REQUESTED='[]' GH_STUB_PR_STATE=CLOSED
+  queue_pr roofstock otto-leases-service 265
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [[ "$output" == *"state is CLOSED, not OPEN"* ]]
+  [ ! -e "$(request_path roofstock otto-leases-service 265)" ]
+}
+
+@test "a queued PR keeps its request file after the reviewers fail" {
+  write_claude_stub writes
+  export GH_STUB_REQUESTED='[]'
+  printf '#!/bin/bash\ncat > /dev/null\nexit 1\n' > "$PR_REVIEW_RUN_ALL"
+  queue_pr roofstock otto-leases-service 265
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [[ "$output" == *"poll FAILED — pr-review-run-all exited nonzero"* ]]
+  [ -f "$(request_path roofstock otto-leases-service 265)" ]
+}
+
+@test "a queued PR keeps its request file after the triage exits nonzero" {
+  printf '#!/bin/bash\nexit 1\n' > "$PR_REVIEW_POLLER_CLAUDE"
+  chmod +x "$PR_REVIEW_POLLER_CLAUDE"
+  export GH_STUB_REQUESTED='[]'
+  queue_pr roofstock otto-leases-service 265
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [[ "$output" == *"poll FAILED — claude triage exited rc=1"* ]]
+  [ -f "$(request_path roofstock otto-leases-service 265)" ]
+}
+
+@test "a queued PR keeps its request file after a triage that wrote no findings log" {
+  write_claude_stub silent
+  export GH_STUB_REQUESTED='[]'
+  queue_pr roofstock otto-leases-service 265
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [[ "$output" == *"findings log(s) missing or stale after triage"* ]]
+  [ -f "$(request_path roofstock otto-leases-service 265)" ]
 }
