@@ -63,6 +63,7 @@ pr-review-poller run          # run one cycle right now (headless, respects lock
 pr-review-poller run --head   # debug of the skill only; with no PR URLs the triage reviews nothing
 pr-review-poller logs         # tail -F the stdout log
 pr-review-poller config       # print the config file
+pr-review-poller request <pr-url>   # queue one named PR for the next tick
 pr-review-poller help
 ```
 
@@ -74,6 +75,27 @@ pr-review-poller run --force              # bypass the frequency gate for this s
 pr-review-poller run --no-post            # do not post this run: POST decisions become HOLD,
                                           # APPROVE still approves. Default posts, except --verify and --head
 ```
+
+Review a named PR:
+
+`pr-review-poller request <pr-url>` queues one PR that the searches would not admit. The last line of its output is the answer:
+
+| Last line | Exit | Meaning |
+|---|---|---|
+| `queued <owner>/<repo>#<n>` | 0 | the PR waits in `~/.local/state/pr-review-poller/requested.d/` |
+| `not queued: MERGED` or `CLOSED` | 4 | the PR is not open |
+| `not queued: not cloned` | 4 | `~/projects/work/<repo>` is not a clone of `<owner>/<repo>`, or the PR comes from a fork |
+| `not queued: reviewed at head` | 4 | the work account's latest review is at the PR's head |
+| `not queued: approved` | 4 | someone's latest review is an approve |
+| `not queued: held at head` | 4 | the ledger holds the PR at its head for a human |
+| `not queued: poller stopped` | 4 | the launchd job is not loaded |
+| `expected GitHub PR URL` | 2 | the argument is not a PR URL |
+
+A `gh` failure exits 1 with the error on stderr and queues nothing. The command works from any directory: it reads the PR from the work clone that `PR_REVIEW_POLLER_WORK_CWD` names, the same default as `run`, and exits 1 when that clone is missing.
+
+The next tick that passes the frequency gate reviews a queued PR. For such a PR the tick skips the author gate and the code-owner gate, so a review or an approve under the work account can land in any cloned repo and on any author's PR. The tick keeps every other check: the clone, the open state, the commit-age gate, the dedup against his last review, another reviewer's approve and the ledger. A failed code-owner map still skips the PR.
+
+The request file leaves the queue when the tick skips the PR for good (not open, reviewed at head, approved, held at head), or when a tick that started after the request ends its triage with `poll done`. A failed tick, an in-flight entry and the commit-age gate keep the file. A `--verify` tick skips a queued PR before any check: it changes neither the request file nor the ledger for it, so the next real tick reviews it. `pr-review-poller status` lists the queue. To drop a request by hand, remove its file `~/.local/state/pr-review-poller/requested.d/<owner>__<repo>__<n>.json`.
 
 ## Uninstall
 
