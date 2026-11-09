@@ -91,7 +91,7 @@ Review a named PR:
 | `not queued: poller stopped` | 4 | the launchd job is not loaded |
 | `expected GitHub PR URL` | 2 | the argument is not a PR URL |
 
-A `gh` failure exits 1 with the error on stderr and queues nothing.
+A `gh` failure exits 1 with the error on stderr and queues nothing. The command works from any directory: it reads the PR from the work clone that `PR_REVIEW_POLLER_WORK_CWD` names, the same default as `run`, and exits 1 when that clone is missing.
 
 The next tick that passes the frequency gate reviews a queued PR. For such a PR the tick skips the author gate and the code-owner gate, so a review or an approve under the work account can land in any cloned repo and on any author's PR. The tick keeps every other check: the clone, the open state, the commit-age gate, the dedup against his last review, another reviewer's approve and the ledger. A failed code-owner map still skips the PR.
 
