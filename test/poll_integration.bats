@@ -1297,12 +1297,18 @@ RA
   [ -f "$(request_path roofstock otto-leases-service 265)" ]
 }
 
-@test "a verify tick keeps a queued PR's request file" {
+@test "a verify tick leaves a queued PR alone, and the next real tick reviews it" {
   write_claude_stub writes
-  export GH_STUB_REQUESTED='[]'
   queue_pr roofstock otto-leases-service 265
   run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
   [ "$status" -eq 0 ]
+  [[ "$output" == *"skip #265 (roofstock/otto-leases-service): requested by name — a verify tick leaves it to the next real tick"* ]]
+  [[ "$output" != *"launching"* ]]
   [[ "$output" == *"poll done"* ]]
   [ -f "$(request_path roofstock otto-leases-service 265)" ]
+  [ "$(jq -r '."roofstock/otto-leases-service#265" // "none"' "$PR_REVIEW_POLLER_STATE_DIR/held.json" 2>/dev/null || echo none)" = "none" ]
+  run "$SCRIPT_UNDER_TEST" run --force --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"launching 1 reviewer"* ]]
+  [ ! -e "$(request_path roofstock otto-leases-service 265)" ]
 }

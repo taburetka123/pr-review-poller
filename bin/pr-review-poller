@@ -894,6 +894,11 @@ filter_prs() {
   while IFS=$'\t' read -r owner repo number author via_requested via_reviewed via_named; do
     [[ -z "$number" ]] && continue
 
+    if [[ "$via_named" == "1" && "${VERIFY:-0}" == "1" ]]; then
+      echo "  skip #$number ($owner/$repo): requested by name — a verify tick leaves it to the next real tick"
+      continue
+    fi
+
     # 0. A PR found only by the reviewed-by search needs the poller's own record.
     if [[ "$via_requested" != "1" && "$via_named" != "1" ]]; then
       if [[ ! -f "$REVIEWED_FILE" ]] || ! jq -e --arg key "$owner/$repo#$number" 'has($key)' "$REVIEWED_FILE" >/dev/null 2>&1; then
@@ -1829,12 +1834,10 @@ OSA
     notify_failure "$_failed"
     exit 1
   fi
-  if [[ "$VERIFY" != "1" ]]; then
-    for _s in "${FILTER_SURVIVORS[@]}"; do
-      IFS=$'\t' read -r _o _r _n _rest <<<"$_s"
-      drop_request "$_o" "$_r" "$_n"
-    done
-  fi
+  for _s in "${FILTER_SURVIVORS[@]}"; do
+    IFS=$'\t' read -r _o _r _n _rest <<<"$_s"
+    drop_request "$_o" "$_r" "$_n"
+  done
   mkdir -p "$(dirname "$LAST_RUN_FILE")"
   echo "$TICK_START" > "$LAST_RUN_FILE"
   echo "[$(date -Iseconds)] poll done"

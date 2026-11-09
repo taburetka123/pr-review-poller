@@ -95,7 +95,7 @@ A `gh` failure exits 1 with the error on stderr and queues nothing. The command 
 
 The next tick that passes the frequency gate reviews a queued PR. For such a PR the tick skips the author gate and the code-owner gate, so a review or an approve under the work account can land in any cloned repo and on any author's PR. The tick keeps every other check: the clone, the open state, the commit-age gate, the dedup against his last review, another reviewer's approve and the ledger. A failed code-owner map still skips the PR.
 
-The request file leaves the queue when the tick skips the PR for good (not open, reviewed at head, approved, held at head), or when a tick that started after the request ends its triage with `poll done`. A failed tick, a `--verify` tick, an in-flight entry and the commit-age gate keep the file. `pr-review-poller status` lists the queue.
+The request file leaves the queue when the tick skips the PR for good (not open, reviewed at head, approved, held at head), or when a tick that started after the request ends its triage with `poll done`. A failed tick, an in-flight entry and the commit-age gate keep the file. A `--verify` tick skips a queued PR before any check: it changes neither the request file nor the ledger for it, so the next real tick reviews it. `pr-review-poller status` lists the queue.
 
 ## Uninstall
 
