@@ -5,6 +5,8 @@ HEAD_OID="dc2354f0f3270e27d8b06cdd3801c1e7f6b69e28"
 setup() {
   export HOME="$BATS_TEST_TMPDIR/home"
   mkdir -p "$HOME/projects/work/otto-leases-service"
+  git -C "$HOME/projects/work/otto-leases-service" init -q
+  git -C "$HOME/projects/work/otto-leases-service" remote add origin git@github-work:roofstock/otto-leases-service.git
   export PR_REVIEW_POLLER_CONFIG="$BATS_TEST_TMPDIR/config.env"
   export PR_REVIEW_POLLER_STATE_DIR="$BATS_TEST_TMPDIR/state"
   export PR_REVIEW_POLLER_WORK_CWD="$HOME/projects/work/otto-leases-service"
@@ -36,7 +38,7 @@ LC
 }
 
 pr_json() {
-  export GH_STUB_PR_JSON='{"state":"'"$1"'","headRefOid":"'"$HEAD_OID"'","reviews":'"$2"'}'
+  export GH_STUB_PR_JSON='{"state":"'"$1"'","headRefOid":"'"$HEAD_OID"'","reviews":'"$2"',"isCrossRepository":'"${3:-false}"'}'
 }
 
 last_line() {
@@ -167,4 +169,26 @@ hold_at_head() {
   PR_REVIEW_POLLER_WORK_CWD="$BATS_TEST_TMPDIR/none" run "$SCRIPT_UNDER_TEST" request "$URL"
   [ "$status" -eq 1 ]
   [ ! -e "$F" ]
+}
+
+@test "a PR of another owner whose repo name matches a clone is not queued" {
+  run "$SCRIPT_UNDER_TEST" request "https://github.com/mynd/otto-leases-service/pull/265"
+  [ "$status" -eq 4 ]
+  [ "$(last_line)" = "not queued: not cloned" ]
+  [ ! -d "$PR_REVIEW_POLLER_STATE_DIR/requested.d" ]
+}
+
+@test "a PR from a fork is not queued" {
+  pr_json OPEN '[]' true
+  run "$SCRIPT_UNDER_TEST" request "$URL"
+  [ "$status" -eq 4 ]
+  [ "$(last_line)" = "not queued: not cloned" ]
+  [ ! -e "$F" ]
+}
+
+@test "a clone whose origin is an https URL still queues" {
+  git -C "$HOME/projects/work/otto-leases-service" remote set-url origin https://github.com/roofstock/otto-leases-service
+  run "$SCRIPT_UNDER_TEST" request "$URL"
+  [ "$status" -eq 0 ]
+  [ "$(last_line)" = "queued roofstock/otto-leases-service#265" ]
 }

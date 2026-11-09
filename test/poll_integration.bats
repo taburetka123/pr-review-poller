@@ -1296,3 +1296,13 @@ RA
   [[ "$output" == *"findings log(s) missing or stale after triage"* ]]
   [ -f "$(request_path roofstock otto-leases-service 265)" ]
 }
+
+@test "a verify tick keeps a queued PR's request file" {
+  write_claude_stub writes
+  export GH_STUB_REQUESTED='[]'
+  queue_pr roofstock otto-leases-service 265
+  run "$SCRIPT_UNDER_TEST" run --verify --min-commit-age 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"poll done"* ]]
+  [ -f "$(request_path roofstock otto-leases-service 265)" ]
+}

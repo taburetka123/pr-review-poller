@@ -1829,10 +1829,12 @@ OSA
     notify_failure "$_failed"
     exit 1
   fi
-  for _s in "${FILTER_SURVIVORS[@]}"; do
-    IFS=$'\t' read -r _o _r _n _rest <<<"$_s"
-    drop_request "$_o" "$_r" "$_n"
-  done
+  if [[ "$VERIFY" != "1" ]]; then
+    for _s in "${FILTER_SURVIVORS[@]}"; do
+      IFS=$'\t' read -r _o _r _n _rest <<<"$_s"
+      drop_request "$_o" "$_r" "$_n"
+    done
+  fi
   mkdir -p "$(dirname "$LAST_RUN_FILE")"
   echo "$TICK_START" > "$LAST_RUN_FILE"
   echo "[$(date -Iseconds)] poll done"
@@ -1944,7 +1946,7 @@ cmd_clear_hold() {
 }
 
 cmd_request() {
-  local arg="${1:-}" owner repo n me info state head_oid tmp work_cwd
+  local arg="${1:-}" owner repo n me info state head_oid tmp work_cwd origin
   if ! [[ "$arg" =~ github\.com/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
     echo "expected GitHub PR URL"
     exit 2
@@ -1965,7 +1967,7 @@ cmd_request() {
     exit 1
   fi
   export GH_TOKEN
-  if ! info=$(gh pr view "$n" -R "$owner/$repo" --json state,reviews,headRefOid 2>&1); then
+  if ! info=$(gh pr view "$n" -R "$owner/$repo" --json state,reviews,headRefOid,isCrossRepository 2>&1); then
     echo "gh pr view failed: $info" >&2
     exit 1
   fi
@@ -1979,7 +1981,10 @@ cmd_request() {
     echo "not queued: $state"
     exit 4
   fi
-  if [[ ! -d "$HOME/projects/work/$repo" ]]; then
+  origin=$(git -C "$HOME/projects/work/$repo" remote get-url origin 2>/dev/null) || origin=""
+  origin="${origin%.git}"
+  if [[ "$origin" != *[:/]"$owner/$repo" ]] \
+     || [[ "$(printf '%s' "$info" | jq -r '.isCrossRepository // false' 2>/dev/null)" == "true" ]]; then
     echo "not queued: not cloned"
     exit 4
   fi
