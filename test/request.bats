@@ -7,6 +7,7 @@ setup() {
   mkdir -p "$HOME/projects/work/otto-leases-service"
   export PR_REVIEW_POLLER_CONFIG="$BATS_TEST_TMPDIR/config.env"
   export PR_REVIEW_POLLER_STATE_DIR="$BATS_TEST_TMPDIR/state"
+  export PR_REVIEW_POLLER_WORK_CWD="$HOME/projects/work/otto-leases-service"
   mkdir -p "$PR_REVIEW_POLLER_STATE_DIR" "$BATS_TEST_TMPDIR/bin"
   cat > "$BATS_TEST_TMPDIR/bin/gh" <<'GH'
 #!/bin/bash
@@ -15,6 +16,7 @@ case "$1 $2" in
   "auth token") echo "gho_stub" ;;
   "pr view")
     [ -n "${GH_STUB_PR_FAIL:-}" ] && { echo "HTTP 502: bad gateway" >&2; exit 1; }
+    [ "$PWD" -ef "$PR_REVIEW_POLLER_WORK_CWD" ] || { echo "GraphQL: Could not resolve to a Repository" >&2; exit 1; }
     printf '%s\n' "$GH_STUB_PR_JSON" ;;
   *) echo "unexpected gh call: $*" >&2; exit 1 ;;
 esac
@@ -152,4 +154,17 @@ hold_at_head() {
   run "$SCRIPT_UNDER_TEST" status
   [ "$status" -eq 0 ]
   [[ "$output" != *"requested ("* ]]
+}
+
+@test "request reads the PR from the work clone, whatever directory it is called from" {
+  cd "$BATS_TEST_TMPDIR"
+  run "$SCRIPT_UNDER_TEST" request "$URL"
+  [ "$status" -eq 0 ]
+  [ "$(last_line)" = "queued roofstock/otto-leases-service#265" ]
+}
+
+@test "request with no work clone to read from exits 1 and queues nothing" {
+  PR_REVIEW_POLLER_WORK_CWD="$BATS_TEST_TMPDIR/none" run "$SCRIPT_UNDER_TEST" request "$URL"
+  [ "$status" -eq 1 ]
+  [ ! -e "$F" ]
 }

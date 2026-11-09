@@ -1944,7 +1944,7 @@ cmd_clear_hold() {
 }
 
 cmd_request() {
-  local arg="${1:-}" owner repo n me info state head_oid tmp
+  local arg="${1:-}" owner repo n me info state head_oid tmp work_cwd
   if ! [[ "$arg" =~ github\.com/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
     echo "expected GitHub PR URL"
     exit 2
@@ -1953,6 +1953,11 @@ cmd_request() {
   if ! launchctl list | awk '{print $3}' | grep -qx "$LABEL"; then
     echo "not queued: poller stopped"
     exit 4
+  fi
+  work_cwd="${PR_REVIEW_POLLER_WORK_CWD:-$HOME/projects/work/otto-service-requests-service}"
+  if ! cd "$work_cwd" 2>/dev/null; then
+    echo "work cwd missing ($work_cwd)" >&2
+    exit 1
   fi
   me="${PR_REVIEW_POLLER_GH_USER:-aleksandr-beliakov-rs}"
   if ! GH_TOKEN=$(gh auth token --user "$me" -h github.com 2>&1); then
